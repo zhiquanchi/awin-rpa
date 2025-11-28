@@ -6,10 +6,271 @@ from bs4 import BeautifulSoup
 import questionary
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
+import json
+from pathlib import Path
 
 console = Console()
 
 logger.add("file.log")
+
+# 邀请信息配置文件路径
+MESSAGES_FILE = Path(__file__).parent / "invitation_messages.json"
+
+# 默认邀请信息
+DEFAULT_MESSAGE = {
+    "name": "默认邀请信息",
+    "content": """Join Giftlab Affiliate Program(95201) on Awin!
+Want to offer your audience unique gifts while earning one of the best commission rates in the industry?
+I'm from Giftlab, and we'd love to partner. Our Awin program offers:
+💥 20% Commission on Your First Order 
+✅ 10% Standard Commission & More Flexible Commissions
+Your content is a perfect match for our brand. Join us to boost your revenue!
+"""
+}
+
+
+def load_messages() -> list[dict]:
+    """从文件加载所有邀请信息"""
+    if MESSAGES_FILE.exists():
+        try:
+            with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
+                messages = json.load(f)
+                if messages:
+                    return messages
+        except (json.JSONDecodeError, IOError):
+            pass
+    # 如果文件不存在或为空,返回默认信息
+    return [DEFAULT_MESSAGE]
+
+
+def save_messages(messages: list[dict]):
+    """保存邀请信息到文件"""
+    with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
+        json.dump(messages, f, ensure_ascii=False, indent=2)
+
+
+def display_messages(messages: list[dict]):
+    """显示所有邀请信息"""
+    for idx, msg in enumerate(messages, 1):
+        console.print(Panel(
+            msg["content"],
+            title=f"[bold cyan]#{idx} {msg['name']}[/bold cyan]",
+            border_style="cyan",
+            expand=False
+        ))
+        console.print()  # 添加空行分隔
+
+
+def add_message(messages: list[dict]) -> list[dict]:
+    """新增邀请信息"""
+    console.print("\n[bold cyan]➕ 新增邀请信息[/bold cyan]")
+    
+    name = questionary.text("请输入邀请信息名称:").ask()
+    if not name:
+        console.print("[yellow]已取消[/yellow]")
+        return messages
+    
+    content = questionary.text(
+        "请输入邀请信息内容 (支持多行):",
+        multiline=True
+    ).ask()
+    if not content:
+        console.print("[yellow]已取消[/yellow]")
+        return messages
+    
+    messages.append({"name": name, "content": content})
+    save_messages(messages)
+    console.print(f"[green]✅ 已添加邀请信息: {name}[/green]")
+    return messages
+
+
+def edit_message(messages: list[dict]) -> list[dict]:
+    """编辑邀请信息"""
+    if not messages:
+        console.print("[yellow]没有可编辑的邀请信息[/yellow]")
+        return messages
+    
+    display_messages(messages)
+    
+    choices = [f"{i+1}. {msg['name']}" for i, msg in enumerate(messages)]
+    choices.append("取消")
+    
+    selection = questionary.select(
+        "选择要编辑的邀请信息:",
+        choices=choices
+    ).ask()
+    
+    if selection == "取消" or selection is None:
+        return messages
+    
+    idx = int(selection.split(".")[0]) - 1
+    msg = messages[idx]
+    
+    console.print(f"\n[bold]当前内容:[/bold]\n[dim]{msg['content']}[/dim]\n")
+    
+    new_name = questionary.text(
+        "请输入新名称 (留空保持不变):",
+        default=msg["name"]
+    ).ask()
+    
+    new_content = questionary.text(
+        "请输入新内容 (留空保持不变):",
+        default=msg["content"],
+        multiline=True
+    ).ask()
+    
+    if new_name:
+        messages[idx]["name"] = new_name
+    if new_content:
+        messages[idx]["content"] = new_content
+    
+    save_messages(messages)
+    console.print(f"[green]✅ 已更新邀请信息: {messages[idx]['name']}[/green]")
+    return messages
+
+
+def delete_message(messages: list[dict]) -> list[dict]:
+    """删除邀请信息"""
+    if len(messages) <= 1:
+        console.print("[yellow]至少需要保留一条邀请信息[/yellow]")
+        return messages
+    
+    display_messages(messages)
+    
+    choices = [f"{i+1}. {msg['name']}" for i, msg in enumerate(messages)]
+    choices.append("取消")
+    
+    selection = questionary.select(
+        "选择要删除的邀请信息:",
+        choices=choices
+    ).ask()
+    
+    if selection == "取消" or selection is None:
+        return messages
+    
+    idx = int(selection.split(".")[0]) - 1
+    deleted_name = messages[idx]["name"]
+    
+    confirm = questionary.confirm(
+        f"确定要删除 '{deleted_name}' 吗?",
+        default=False
+    ).ask()
+    
+    if confirm:
+        messages.pop(idx)
+        save_messages(messages)
+        console.print(f"[green]✅ 已删除邀请信息: {deleted_name}[/green]")
+    
+    return messages
+
+
+def settings_mode():
+    """设置模式 - 管理邀请信息"""
+    console.print(Panel.fit(
+        "[bold yellow]⚙️ 设置模式 - 管理邀请信息[/bold yellow]",
+        border_style="yellow"
+    ))
+    
+    messages = load_messages()
+    
+    while True:
+        display_messages(messages)
+        
+        action = questionary.select(
+            "请选择操作:",
+            choices=[
+                "➕ 新增邀请信息",
+                "✏️ 编辑邀请信息",
+                "🗑️ 删除邀请信息",
+                "🔙 返回主菜单"
+            ]
+        ).ask()
+        
+        if action is None or "返回" in action:
+            break
+        elif "新增" in action:
+            messages = add_message(messages)
+        elif "编辑" in action:
+            messages = edit_message(messages)
+        elif "删除" in action:
+            messages = delete_message(messages)
+
+
+def select_message() -> str:
+    """选择或修改邀请信息"""
+    messages = load_messages()
+    
+    # 显示当前邀请信息
+    console.print("\n[bold]📧 当前可用的邀请信息:[/bold]")
+    display_messages(messages)
+    
+    # 选择邀请信息
+    choices = [f"{i+1}. {msg['name']}" for i, msg in enumerate(messages)]
+    
+    selection = questionary.select(
+        "请选择要使用的邀请信息:",
+        choices=choices
+    ).ask()
+    
+    if selection is None:
+        console.print("[yellow]已取消操作[/yellow]")
+        exit(0)
+    
+    idx = int(selection.split(".")[0]) - 1
+    selected_msg = messages[idx]
+    
+    # 显示完整内容
+    console.print(Panel(
+        selected_msg["content"],
+        title=f"[bold cyan]{selected_msg['name']}[/bold cyan]",
+        border_style="cyan"
+    ))
+    
+    # 询问是否需要修改
+    modify = questionary.confirm(
+        "是否需要修改这条邀请信息?",
+        default=False
+    ).ask()
+    
+    if modify:
+        new_content = questionary.text(
+            "请输入修改后的邀请信息 (支持多行):",
+            default=selected_msg["content"],
+            multiline=True
+        ).ask()
+        
+        if new_content is None:
+            console.print("[yellow]已取消修改[/yellow]")
+            return selected_msg["content"]
+        
+        # 询问是否保存修改
+        save_option = questionary.select(
+            "是否保存这次修改?",
+            choices=[
+                "仅本次使用 (不保存)",
+                "覆盖原有信息",
+                "保存为新的邀请信息"
+            ]
+        ).ask()
+        
+        if save_option == "覆盖原有信息":
+            messages[idx]["content"] = new_content
+            save_messages(messages)
+            console.print(f"[green]✅ 已更新邀请信息: {selected_msg['name']}[/green]")
+        elif save_option == "保存为新的邀请信息":
+            new_name = questionary.text(
+                "请输入新邀请信息的名称:",
+                default=f"{selected_msg['name']} (修改版)"
+            ).ask()
+            if new_name:
+                messages.append({"name": new_name, "content": new_content})
+                save_messages(messages)
+                console.print(f"[green]✅ 已保存新邀请信息: {new_name}[/green]")
+        
+        return new_content
+    
+    return selected_msg["content"]
 
 browser = Chromium()
 tab = browser.latest_tab
@@ -142,6 +403,25 @@ def get_user_input():
         border_style="cyan"
     ))
     
+    # 主菜单选择
+    action = questionary.select(
+        "请选择操作:",
+        choices=[
+            "🚀 开始执行 RPA",
+            "⚙️ 设置模式 (管理邀请信息)",
+            "❌ 退出"
+        ]
+    ).ask()
+    
+    if action is None or "退出" in action:
+        console.print("[yellow]已退出[/yellow]")
+        exit(0)
+    
+    if "设置" in action:
+        settings_mode()
+        # 设置完成后重新显示主菜单
+        return get_user_input()
+    
     # 获取页数
     page_count = questionary.text(
         "请输入要处理的页数:",
@@ -153,30 +433,8 @@ def get_user_input():
         console.print("[yellow]已取消操作[/yellow]")
         exit(0)
     
-    # 选择是否使用默认消息
-    use_default_msg = questionary.confirm(
-        "是否使用默认邀请消息?",
-        default=True
-    ).ask()
-    
-    default_msg = '''Join Giftlab Affiliate Program(95201) on Awin!
-Want to offer your audience unique gifts while earning one of the best commission rates in the industry?
-I'm from Giftlab, and we'd love to partner. Our Awin program offers:
-💥 20% Commission on Your First Order 
-✅ 10% Standard Commission & More Flexible Commissions
-Your content is a perfect match for our brand. Join us to boost your revenue!
-'''
-    
-    if use_default_msg:
-        msg = default_msg
-    else:
-        msg = questionary.text(
-            "请输入自定义邀请消息 (多行输入，输入完成后按 Enter):",
-            multiline=True
-        ).ask()
-        if msg is None:
-            console.print("[yellow]已取消操作[/yellow]")
-            exit(0)
+    # 选择邀请信息
+    msg = select_message()
     
     # 确认执行
     console.print("\n[bold]📋 执行配置:[/bold]")
