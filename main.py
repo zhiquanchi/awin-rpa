@@ -17,18 +17,6 @@ logger.add("file.log")
 # 邀请信息配置文件路径
 MESSAGES_FILE = Path(__file__).parent / "invitation_messages.json"
 
-# 默认邀请信息
-DEFAULT_MESSAGE = {
-    "name": "默认邀请信息",
-    "content": """Join Giftlab Affiliate Program(95201) on Awin!
-Want to offer your audience unique gifts while earning one of the best commission rates in the industry?
-I'm from Giftlab, and we'd love to partner. Our Awin program offers:
-💥 20% Commission on Your First Order 
-✅ 10% Standard Commission & More Flexible Commissions
-Your content is a perfect match for our brand. Join us to boost your revenue!
-"""
-}
-
 
 def load_messages() -> list[dict]:
     """从文件加载所有邀请信息"""
@@ -40,8 +28,9 @@ def load_messages() -> list[dict]:
                     return messages
         except (json.JSONDecodeError, IOError):
             pass
-    # 如果文件不存在或为空,返回默认信息
-    return [DEFAULT_MESSAGE]
+    # 如果文件不存在,提示用户创建
+    console.print("[yellow]⚠️ 未找到邀请信息配置文件，请先在设置模式中添加邀请信息[/yellow]")
+    return []
 
 
 def save_messages(messages: list[dict]):
@@ -132,8 +121,8 @@ def edit_message(messages: list[dict]) -> list[dict]:
 
 def delete_message(messages: list[dict]) -> list[dict]:
     """删除邀请信息"""
-    if len(messages) <= 1:
-        console.print("[yellow]至少需要保留一条邀请信息[/yellow]")
+    if len(messages) <= 0:
+        console.print("[yellow]没有可删除的邀请信息[/yellow]")
         return messages
     
     display_messages(messages)
@@ -200,6 +189,15 @@ def settings_mode():
 def select_message() -> str:
     """选择或修改邀请信息"""
     messages = load_messages()
+    
+    # 检查是否有可用的邀请信息
+    if not messages:
+        console.print("[red]❌ 没有可用的邀请信息，请先在设置模式中添加[/red]")
+        settings_mode()
+        messages = load_messages()
+        if not messages:
+            console.print("[red]❌ 仍然没有邀请信息，无法继续[/red]")
+            exit(1)
     
     # 显示当前邀请信息
     console.print("\n[bold]📧 当前可用的邀请信息:[/bold]")
