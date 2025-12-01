@@ -363,35 +363,80 @@ def click_next():
     tab.wait.doc_loaded()  # 等待文档加载完成
     # 等待表格内容更新
     tab.wait(2, 4)  # 额外等待确保内容刷新
-def main(page_count:int,msg:str):
+
+
+def send_invite_to_publisher(publisher_id: str, msg: str) -> bool:
+    '''
+    向单个 publisher 发送邀请
+    返回 True 表示成功，False 表示按钮不存在（需要刷新列表）
+    '''
+    # 查找对应的邀请按钮
+    invite_link = tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
+    if not invite_link:
+        logger.warning(f"找不到 publisher ID: {publisher_id} 的邀请按钮，可能已被处理")
+        return False
+    
+    logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
+    # 点击邀请按钮
+    invite_link.click()
+    
+    # 输入邀请信息
+    input_message(message=msg)
+    
+    # 等待 send invite 按钮可点击，然后点击
+    send_btn = tab.ele('css:button.btn-small-green.modal_save')
+    send_btn.wait.clickable(timeout=10)
+    send_btn.click()
+    
+    # 等待弹窗出现
+    popup_ok_btn = tab.ele('#popup_ok')
+    popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
+    
+    # 点击ok按钮关闭弹窗
+    popup_ok_btn.click()
+    
+    tab.wait(2, 3)
+    return True
+
+
+def main(page_count: int, msg: str):
     '''
     rpa 主函数。
     page_count: 需要处理的页数。
     msg: 申请信息内容。
     '''
     for i in range(page_count):
-        publisher_ids=get_publisher_ids()
-        for publisher_id in publisher_ids:
-            logger.info(f"向 publisher ID: {publisher_id}的发送invitation")
-            # 点击对应的publisher ID的邀请按钮
-            click_invite_button_by_publisher_id(publisher_id)
-            # 输入邀请信息
-            input_message(message=msg)
-            # 等待 send invite 按钮可点击，然后点击
-            send_btn = tab.ele('css:button.btn-small-green.modal_save')
-            send_btn.wait.clickable(timeout=10)
-            send_btn.click()
-            # 等待Your invitation has been sent. 弹窗出现,如果指定时间内未出现则报错
-            popup_ok_btn = tab.ele('#popup_ok')
-            popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
-            # 判断 popup_border 是发送成功，还是已经邀请过
-            # TODO 这里可以根据 popup_border 的内容进行不同的处理。如果邀请过可能会无法进行下一步。实际执行中有问题再来看如何修复。
-            # 点击ok按钮关闭弹窗
-            popup_ok_btn.click()
-
-            tab.wait(3,5)
-        # 点击下一页
-        click_next()
+        console.print(f"\n[bold blue]📄 正在处理第 {i + 1}/{page_count} 页[/bold blue]")
+        
+        # 处理当前页面，直到没有可邀请的 publisher
+        while True:
+            # 获取当前页面的 publisher IDs
+            publisher_ids = get_publisher_ids()
+            
+            if not publisher_ids:
+                logger.info("当前页面没有可邀请的 publisher，进入下一页")
+                break
+            
+            logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
+            
+            # 逐个处理
+            processed_any = False
+            for publisher_id in publisher_ids:
+                success = send_invite_to_publisher(publisher_id, msg)
+                if success:
+                    processed_any = True
+                # 如果失败（按钮不存在），继续尝试下一个
+            
+            # 如果这一轮没有成功处理任何一个，说明列表已经空了或都失效了
+            if not processed_any:
+                logger.info("当前页面所有按钮都已失效，进入下一页")
+                break
+        
+        # 如果不是最后一页，点击下一页
+        if i < page_count - 1:
+            click_next()
+    
+    console.print(f"\n[bold green]✅ 已处理完 {page_count} 页[/bold green]")
 
 
 def get_user_input():
