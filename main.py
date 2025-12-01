@@ -378,7 +378,7 @@ def main(page_count:int,msg:str):
             # 输入邀请信息
             input_message(message=msg)
             # 等待 send invite 按钮可点击，然后点击
-            send_btn = tab.ele('.btn-small-green.modal_save')
+            send_btn = tab.ele('css:button.btn-small-green.modal_save')
             send_btn.wait.clickable(timeout=10)
             send_btn.click()
             # 等待Your invitation has been sent. 弹窗出现,如果指定时间内未出现则报错
