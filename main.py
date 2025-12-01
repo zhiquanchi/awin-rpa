@@ -377,14 +377,17 @@ def main(page_count:int,msg:str):
             click_invite_button_by_publisher_id(publisher_id)
             # 输入邀请信息
             input_message(message=msg)
-            # 点击 send invite 按钮
-            tab('.btn-small-green modal_save').click()
+            # 等待 send invite 按钮可点击，然后点击
+            send_btn = tab.ele('.btn-small-green.modal_save')
+            send_btn.wait.clickable(timeout=10)
+            send_btn.click()
             # 等待Your invitation has been sent. 弹窗出现,如果指定时间内未出现则报错
-            popup_border = tab.wait.ele_displayed('#popup_ok', timeout=10,raise_err=True)
+            popup_ok_btn = tab.ele('#popup_ok')
+            popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
             # 判断 popup_border 是发送成功，还是已经邀请过
             # TODO 这里可以根据 popup_border 的内容进行不同的处理。如果邀请过可能会无法进行下一步。实际执行中有问题再来看如何修复。
             # 点击ok按钮关闭弹窗
-            tab('#popup_ok').click()
+            popup_ok_btn.click()
 
             tab.wait(3,5)
         # 点击下一页
