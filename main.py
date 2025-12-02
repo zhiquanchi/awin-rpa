@@ -370,11 +370,19 @@ def send_invite_to_publisher(publisher_id: str, msg: str) -> bool:
     向单个 publisher 发送邀请
     返回 True 表示成功，False 表示按钮不存在（需要刷新列表）
     '''
+    global tab
+    
     # 查找对应的邀请按钮
     invite_link = tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
     if not invite_link:
-        logger.warning(f"找不到 publisher ID: {publisher_id} 的邀请按钮，可能已被处理")
-        return False
+        logger.warning(f"找不到 publisher ID: {publisher_id} 的邀请按钮，尝试重新获取页面元素")
+        # 重新连接浏览器获取最新的 tab 对象
+        tab = browser.latest_tab
+        # 再次尝试查找
+        invite_link = tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
+        if not invite_link:
+            logger.warning(f"重新获取后仍找不到 publisher ID: {publisher_id} 的邀请按钮，跳过")
+            return False
     
     logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
     # 点击邀请按钮
