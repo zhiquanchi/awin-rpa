@@ -224,42 +224,43 @@ class AwinRPA:
         self.tab.wait(2, 3)
         return True
     
-    def run(self, page_count: int, msg: str):
+    def run(self, invite_count: int, msg: str):
         """
         执行 RPA 主流程
-        page_count: 需要处理的页数
+        invite_count: 需要发送的邀请数量
         msg: 申请信息内容
         """
-        for i in range(page_count):
-            console.print(f"\n[bold blue]📄 正在处理第 {i + 1}/{page_count} 页[/bold blue]")
+        sent_count = 0  # 已发送的邀请数量
+        
+        while sent_count < invite_count:
+            publisher_ids = self.get_publisher_ids()
             
-            # 处理当前页面，直到没有可邀请的 publisher
-            while True:
-                publisher_ids = self.get_publisher_ids()
-                
-                if not publisher_ids:
-                    logger.info("当前页面没有可邀请的 publisher，进入下一页")
-                    break
-                
-                logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
-                
-                # 逐个处理
-                processed_any = False
-                for publisher_id in publisher_ids:
-                    success = self.send_invite_to_publisher(publisher_id, msg)
-                    if success:
-                        processed_any = True
-                
-                # 如果这一轮没有成功处理任何一个，说明列表已经空了或都失效了
-                if not processed_any:
-                    logger.info("当前页面所有按钮都已失效，进入下一页")
-                    break
+            if not publisher_ids:
+                logger.info("当前页面没有可邀请的 publisher，尝试下一页")
+                self.click_next_page()
+                continue
             
-            # 如果不是最后一页，点击下一页
-            if i < page_count - 1:
+            logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
+            console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请[/bold blue]")
+            
+            # 逐个处理
+            processed_any = False
+            for publisher_id in publisher_ids:
+                if sent_count >= invite_count:
+                    break
+                    
+                success = self.send_invite_to_publisher(publisher_id, msg)
+                if success:
+                    sent_count += 1
+                    processed_any = True
+                    console.print(f"[green]✅ 已发送 {sent_count}/{invite_count}[/green]")
+            
+            # 如果这一轮没有成功处理任何一个，说明列表已经空了或都失效了，进入下一页
+            if not processed_any:
+                logger.info("当前页面所有按钮都已失效，进入下一页")
                 self.click_next_page()
         
-        console.print(f"\n[bold green]✅ 已处理完 {page_count} 页[/bold green]")
+        console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
 
 
 class AppUI:
@@ -403,20 +404,20 @@ class AppUI:
             self.settings_mode()
             return self.get_user_input()
         
-        page_count = questionary.text(
-            "请输入要处理的页数:",
-            default="1",
+        invite_count = questionary.text(
+            "请输入要发送的邀请数量:",
+            default="10",
             validate=lambda x: x.isdigit() and int(x) > 0 or "请输入有效的正整数"
         ).ask()
         
-        if page_count is None:
+        if invite_count is None:
             console.print("[yellow]已取消操作[/yellow]")
             exit(0)
         
         msg = self.select_message()
         
         console.print("\n[bold]📋 执行配置:[/bold]")
-        console.print(f"  • 处理页数: [green]{page_count}[/green]")
+        console.print(f"  • 发送数量: [green]{invite_count}[/green]")
         console.print(f"  • 消息内容: [dim]{msg[:50]}...[/dim]" if len(msg) > 50 else f"  • 消息内容: [dim]{msg}[/dim]")
         
         confirm = questionary.confirm(
@@ -428,14 +429,14 @@ class AppUI:
             console.print("[yellow]已取消操作[/yellow]")
             exit(0)
         
-        return int(page_count), msg
+        return int(invite_count), msg
     
     def start(self):
         """启动应用程序"""
-        page_count, msg = self.get_user_input()
+        invite_count, msg = self.get_user_input()
         
         console.print("\n[bold green]🚀 开始执行 RPA...[/bold green]")
-        self.rpa.run(page_count=page_count, msg=msg)
+        self.rpa.run(invite_count=invite_count, msg=msg)
         console.print("\n[bold green]✅ 执行完成![/bold green]")
 
 
