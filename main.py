@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 import json
 from pathlib import Path
+import pyperclip
 
 console = Console()
 logger.add("file.log")
@@ -54,8 +55,19 @@ class MessageManager:
             console.print("[yellow]已取消[/yellow]")
             return messages
         
+        clipboard_content = pyperclip.paste().strip()
+        default_content = ""
+        if clipboard_content:
+            use_clipboard = questionary.confirm(
+                f"检测到剪贴板内容，是否直接使用?\n[dim]{clipboard_content[:50]}...[/dim]",
+                default=True
+            ).ask()
+            if use_clipboard:
+                default_content = clipboard_content
+        
         content = questionary.text(
             "请输入邀请信息内容 (支持多行):",
+            default=default_content,
             multiline=True
         ).ask()
         if not content:
@@ -96,9 +108,19 @@ class MessageManager:
             default=msg["name"]
         ).ask()
         
+        clipboard_content = pyperclip.paste().strip()
+        default_content = msg["content"]
+        if clipboard_content and clipboard_content != msg["content"]:
+            use_clipboard = questionary.confirm(
+                f"检测到剪贴板内容，是否替换当前内容?\n[dim]{clipboard_content[:50]}...[/dim]",
+                default=False
+            ).ask()
+            if use_clipboard:
+                default_content = clipboard_content
+        
         new_content = questionary.text(
             "请输入新内容 (留空保持不变):",
-            default=msg["content"],
+            default=default_content,
             multiline=True
         ).ask()
         
