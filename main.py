@@ -1,6 +1,47 @@
 from DrissionPage import Chromium
 from loguru import logger
 import questionary
+import inspect
+
+# 兼容性猴子补丁：尝试为 questionary 的多行输入替换默认提示文本
+# 不同版本的 questionary 实现细节不同：有的在类上提供 INSTRUCTIONS，有的没有。
+# 优先尝试修补模块内任意具有 INSTRUCTIONS 属性的类；若找不到则回退为包装 questionary.text
+try:
+    patched = False
+    for name, obj in inspect.getmembers(questionary.prompts.text):
+        if inspect.isclass(obj) and hasattr(obj, "INSTRUCTIONS"):
+            try:
+                obj.INSTRUCTIONS = "模板输入完成后，先按 esc 再按 enter。保存当前模板。\n"
+                patched = True
+                break
+            except Exception:
+                # 某些实现可能不允许写入，忽略并继续
+                continue
+
+    if not patched:
+        # 回退：包装 questionary.text 工厂函数，在调用时为多行输入尝试传递 instruction 参数（如果支持）
+        _orig_text = questionary.text
+        def _patched_text(*args, **kwargs):
+            try:
+                multiline = kwargs.get("multiline", False)
+                if multiline:
+                    # 仅当调用方没有指定 instruction 时才注入自定义提示
+                    if "instruction" not in kwargs:
+                        kwargs["instruction"] = "模板输入完成后，先按 esc 再按 enter。保存当前模板。\n"
+                return _orig_text(*args, **kwargs)
+            except TypeError:
+                # 如果原函数不接受 instruction 参数，尝试移除并调用原函数
+                #（这意味着无法通过该途径修改提示，保持原状）
+                kwargs.pop("instruction", None)
+                return _orig_text(*args, **kwargs)
+
+        questionary.text = _patched_text
+except Exception:
+    # 任何意外不应阻止程序启动，记录并继续
+    try:
+        logger.warning("未能应用 questionary 多行提示的猴子补丁，继续以默认行为运行。")
+    except Exception:
+        pass
 from rich.console import Console
 from rich.panel import Panel
 import json
