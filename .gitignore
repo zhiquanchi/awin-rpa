@@ -8,6 +8,10 @@ wheels/
 
 # log
 *.log
+awin_audit.jsonl
+seen_publisher_ids.txt
+clicked_publisher_ids.txt
+html_dumps/
 
 # Virtual environments
 .venv

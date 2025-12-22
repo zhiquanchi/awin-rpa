@@ -47,9 +47,53 @@ from rich.panel import Panel
 import json
 from pathlib import Path
 import pyperclip
+from datetime import datetime, timezone
 
 console = Console()
 logger.add("file.log")
+
+
+AUDIT_LOG_PATH = Path(__file__).parent / "awin_audit.jsonl"
+SEEN_IDS_PATH = Path(__file__).parent / "seen_publisher_ids.txt"
+CLICKED_IDS_PATH = Path(__file__).parent / "clicked_publisher_ids.txt"
+HTML_DUMP_DIR = Path(__file__).parent / "html_dumps"
+
+
+def _audit_filter(record) -> bool:
+    return bool(record["extra"].get("audit"))
+
+
+def _load_id_set(path: Path) -> set[str]:
+    try:
+        if not path.exists():
+            return set()
+        ids: set[str] = set()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            value = line.strip()
+            if value:
+                ids.add(value)
+        return ids
+    except Exception:
+        return set()
+
+
+def _append_new_ids(path: Path, ids: list[str]):
+    if not ids:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for value in ids:
+            if value:
+                f.write(f"{value}\n")
+
+
+# 结构化审计日志：只记录与「ID 获取/点击」相关的事件，便于后续分析重复/失效按钮问题
+logger.add(
+    AUDIT_LOG_PATH,
+    serialize=True,
+    filter=_audit_filter,
+    level="INFO",
+)
 
 
 class MessageManager:
@@ -219,6 +263,59 @@ class AwinRPA:
         self.browser = Chromium()
         self.tab = self.browser.latest_tab
         self.message_manager = MessageManager()
+        self._fetch_seq = 0
+        self._click_seq = 0
+        self._seen_publisher_ids: set[str] = _load_id_set(SEEN_IDS_PATH)
+        self._clicked_publisher_ids: set[str] = _load_id_set(CLICKED_IDS_PATH)
+    
+    def _page_context(self) -> dict:
+        try:
+            url = getattr(self.tab, "url", None)
+        except Exception:
+            url = None
+        return {"url": url}
+    
+    def _audit(self, event: str, **extra):
+        logger.bind(
+            audit=True,
+            event=event,
+            ts=datetime.now(timezone.utc).isoformat(),
+            **self._page_context(),
+            **extra,
+        ).info(event)
+
+    def _safe_get_html(self) -> str:
+        try:
+            html = getattr(self.tab, "html", None)
+            if isinstance(html, str) and html:
+                return html
+        except Exception:
+            pass
+
+        try:
+            run_js = getattr(self.tab, "run_js", None)
+            if callable(run_js):
+                html = run_js("return document.documentElement.outerHTML")
+                if isinstance(html, str) and html:
+                    return html
+        except Exception:
+            pass
+
+        return ""
+
+    def _dump_html(self, publisher_id: str, phase: str) -> str | None:
+        try:
+            html = self._safe_get_html()
+            if not html:
+                return None
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            safe_pid = "".join(ch for ch in str(publisher_id) if ch.isalnum() or ch in ("-", "_"))[:64] or "unknown"
+            HTML_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+            path = HTML_DUMP_DIR / f"{ts}_clickseq{self._click_seq}_pid{safe_pid}_{phase}.html"
+            path.write_text(html, encoding="utf-8", errors="ignore")
+            return str(path)
+        except Exception:
+            return None
     
     def refresh_tab(self):
         """重新获取当前浏览器标签页（不刷新页面）"""
@@ -238,7 +335,25 @@ class AwinRPA:
         """获取所有 publisher ID"""
         table = self.tab.ele('xpath=//*[@id="directoryResults"]/table')
         invite_links = table.eles('xpath:.//a[@data-publisherid]')
-        publisher_ids = [link.attr('data-publisherid') for link in invite_links]
+        publisher_ids_raw = [link.attr('data-publisherid') for link in invite_links]
+        publisher_ids = [pid for pid in publisher_ids_raw if pid]
+        publisher_ids = list(dict.fromkeys(publisher_ids))  # 去重且保留顺序
+
+        self._fetch_seq += 1
+        new_ids = [pid for pid in publisher_ids if pid not in self._seen_publisher_ids]
+        self._seen_publisher_ids.update(publisher_ids)
+        _append_new_ids(SEEN_IDS_PATH, new_ids)
+
+        self._audit(
+            "publisher_ids_fetched",
+            fetch_seq=self._fetch_seq,
+            raw_count=len(publisher_ids_raw),
+            unique_count=len(publisher_ids),
+            publisher_ids=publisher_ids,
+            new_publisher_ids=new_ids,
+            new_count=len(new_ids),
+            seen_total=len(self._seen_publisher_ids),
+        )
         return publisher_ids
     
     def input_message(self, message: str):
@@ -247,43 +362,185 @@ class AwinRPA:
     
     def click_next_page(self):
         """点击下一页按钮"""
+        before_url = self._page_context().get("url")
         self.tab.ele('#nextPage').click()
         self.tab.wait.doc_loaded()
         self.tab.wait(2, 4)
+        after_url = self._page_context().get("url")
+        self._audit("next_page_clicked", before_url=before_url, after_url=after_url)
     
     def send_invite_to_publisher(self, publisher_id: str, msg: str) -> bool:
         """
         向单个 publisher 发送邀请
         返回 True 表示成功，False 表示按钮不存在
         """
+        self._click_seq += 1
+        clicked_before = publisher_id in self._clicked_publisher_ids
+        self._audit(
+            "invite_click_attempt",
+            click_seq=self._click_seq,
+            publisher_id=publisher_id,
+            clicked_before=clicked_before,
+        )
+
+        # 点击前校验：如果该 publisher_id 已经点击过，则不再重复点击；同时落盘 HTML 快照（获取前/后）便于排查
+        if clicked_before:
+            html_before_path = self._dump_html(publisher_id=publisher_id, phase="before_fetch")
+
+            try:
+                url = self._page_context().get("url")
+                if url:
+                    self.tab.get(url)
+                    self.tab.wait.doc_loaded()
+            except Exception as e:
+                self._audit(
+                    "duplicate_id_fetch_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    error=str(e),
+                )
+
+            # 触发一次重新获取列表（同时会写入审计日志/seen 文件）
+            try:
+                _ = self.get_publisher_ids()
+            except Exception as e:
+                self._audit(
+                    "duplicate_id_refetch_ids_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    error=str(e),
+                )
+
+            html_after_path = self._dump_html(publisher_id=publisher_id, phase="after_fetch")
+            self._audit(
+                "invite_click_skipped_duplicate",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                html_before_path=html_before_path,
+                html_after_path=html_after_path,
+            )
+            return False
+
         # 查找对应的邀请按钮
         invite_link = self.tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
         if not invite_link:
             logger.warning(f"找不到 publisher ID: {publisher_id} 的邀请按钮，尝试重新获取页面元素")
+            self._audit(
+                "invite_button_missing",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                after_refresh=False,
+            )
             self.refresh_tab()
             invite_link = self.tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
             if not invite_link:
                 logger.warning(f"重新获取后仍找不到 publisher ID: {publisher_id} 的邀请按钮，跳过")
+                self._audit(
+                    "invite_button_missing",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    after_refresh=True,
+                )
                 return False
         
         logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
-        invite_link.click()
-        
-        # 输入邀请信息
-        self.input_message(message=msg)
-        
+
+        try:
+            invite_link.click()
+        except Exception as e:
+            self._audit(
+                "invite_click_failed",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                stage="click_invite_link",
+                error=str(e),
+                attrs={
+                    "class": invite_link.attr("class"),
+                    "aria-disabled": invite_link.attr("aria-disabled"),
+                    "href": invite_link.attr("href"),
+                },
+            )
+            return False
+
+        # 输入邀请信息（等待弹窗/输入框真正出现，避免“按钮已失效但元素仍在”的情况）
+        try:
+            custom_message = self.tab.ele("#customMessage", timeout=8)
+            if not custom_message:
+                self._audit(
+                    "invite_click_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    stage="wait_custom_message",
+                    error="customMessage_not_found",
+                )
+                return False
+            custom_message.input(msg)
+        except Exception as e:
+            self._audit(
+                "invite_click_failed",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                stage="input_message",
+                error=str(e),
+            )
+            return False
+
         # 等待 send invite 按钮可点击，然后点击
-        send_btn = self.tab.ele('css:button.btn-small-green.modal_save')
-        send_btn.wait.clickable(timeout=10)
-        send_btn.click()
-        
-        # 等待弹窗出现
-        popup_ok_btn = self.tab.ele('#popup_ok')
-        popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
-        
-        # 点击ok按钮关闭弹窗
-        popup_ok_btn.click()
-        
+        try:
+            send_btn = self.tab.ele("css:button.btn-small-green.modal_save", timeout=8)
+            if not send_btn:
+                self._audit(
+                    "invite_click_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    stage="wait_send_button",
+                    error="send_button_not_found",
+                )
+                return False
+            send_btn.wait.clickable(timeout=10)
+            send_btn.click()
+        except Exception as e:
+            self._audit(
+                "invite_click_failed",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                stage="click_send_button",
+                error=str(e),
+            )
+            return False
+
+        # 等待弹窗出现并关闭
+        try:
+            popup_ok_btn = self.tab.ele("#popup_ok", timeout=12)
+            if not popup_ok_btn:
+                self._audit(
+                    "invite_click_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    stage="wait_popup_ok",
+                    error="popup_ok_not_found",
+                )
+                return False
+            popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
+            popup_ok_btn.click()
+        except Exception as e:
+            self._audit(
+                "invite_click_failed",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                stage="close_popup_ok",
+                error=str(e),
+            )
+            return False
+
+        self._audit(
+            "invite_sent_success",
+            click_seq=self._click_seq,
+            publisher_id=publisher_id,
+        )
+        if publisher_id not in self._clicked_publisher_ids:
+            self._clicked_publisher_ids.add(publisher_id)
+            _append_new_ids(CLICKED_IDS_PATH, [publisher_id])
         self.tab.wait(2, 3)
         return True
     
