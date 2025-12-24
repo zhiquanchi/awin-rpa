@@ -541,8 +541,6 @@ class AwinRPA:
         msg: 申请信息内容
         """
         sent_count = 0  # 已发送的邀请数量
-        page_sent_count = 0  # 当前页面已发送的邀请数量
-        page_limit = 40  # 每页最多发送40个邀请
 
         while sent_count < invite_count:
             publisher_ids = self.get_publisher_ids()
@@ -550,44 +548,32 @@ class AwinRPA:
             if not publisher_ids:
                 logger.info("当前页面没有可邀请的 publisher，尝试下一页")
                 self.click_next_page()
-                page_sent_count = 0  # 重置当前页面计数
                 continue
 
             logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
-            console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请 (当前页面: {page_sent_count}/{page_limit})[/bold blue]")
+            console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请[/bold blue]")
 
             # 逐个处理
-            processed_any = False
+            found_new = False
             for publisher_id in publisher_ids:
                 if sent_count >= invite_count:
                     break
 
-                # 如果当前页面已发送40个邀请，跳转到下一页
-                if page_sent_count >= page_limit:
-                    logger.info(f"当前页面已发送 {page_sent_count} 个邀请，进入下一页")
-                    self.click_next_page()
-                    page_sent_count = 0  # 重置当前页面计数
-                    break
+                # 如果该 ID 已经点击过，跳过
+                if publisher_id in self._clicked_publisher_ids:
+                    logger.debug(f"publisher ID: {publisher_id} 已经点击过，跳过")
+                    continue
 
+                found_new = True
                 success = self.send_invite_to_publisher(publisher_id, msg)
                 if success:
                     sent_count += 1
-                    page_sent_count += 1
-                    processed_any = True
-                    console.print(f"[green]✅ 已发送 {sent_count}/{invite_count} (当前页面: {page_sent_count}/{page_limit})[/green]")
+                    console.print(f"[green]✅ 已发送 {sent_count}/{invite_count}[/green]")
 
-            # 如果当前页面已发送40个邀请，跳转到下一页
-            if page_sent_count >= page_limit:
-                logger.info(f"当前页面已发送 {page_sent_count} 个邀请，进入下一页")
+            # 如果当前页所有 ID 都已经点击过，进入下一页
+            if not found_new:
+                logger.info("当前页所有 ID 都已经点击过，进入下一页")
                 self.click_next_page()
-                page_sent_count = 0  # 重置当前页面计数
-                continue
-
-            # 如果这一轮没有成功处理任何一个，说明列表已经空了或都失效了，进入下一页
-            if not processed_any:
-                logger.info("当前页面所有按钮都已失效，进入下一页")
-                self.click_next_page()
-                page_sent_count = 0  # 重置当前页面计数
 
         console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
 
