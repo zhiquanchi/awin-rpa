@@ -316,6 +316,13 @@ class AwinRPA:
             return str(path)
         except Exception:
             return None
+
+    def _save_snapshot(self, publisher_id: str, phase: str) -> str | None:
+        """
+        保存 HTML 快照用于对比
+        返回 HTML 文件路径
+        """
+        return self._dump_html(publisher_id, phase)
     
     def refresh_tab(self):
         """重新获取当前浏览器标签页（不刷新页面）"""
@@ -383,53 +390,27 @@ class AwinRPA:
             clicked_before=clicked_before,
         )
 
-        # 点击前校验：如果该 publisher_id 已经点击过，则不再重复点击；同时落盘 HTML 快照（获取前/后）便于排查
-        if clicked_before:
-            html_before_path = self._dump_html(publisher_id=publisher_id, phase="before_fetch")
-
-            try:
-                url = self._page_context().get("url")
-                if url:
-                    self.tab.get(url)
-                    self.tab.wait.doc_loaded()
-            except Exception as e:
-                self._audit(
-                    "duplicate_id_fetch_failed",
-                    click_seq=self._click_seq,
-                    publisher_id=publisher_id,
-                    error=str(e),
-                )
-
-            # 触发一次重新获取列表（同时会写入审计日志/seen 文件）
-            try:
-                _ = self.get_publisher_ids()
-            except Exception as e:
-                self._audit(
-                    "duplicate_id_refetch_ids_failed",
-                    click_seq=self._click_seq,
-                    publisher_id=publisher_id,
-                    error=str(e),
-                )
-
-            html_after_path = self._dump_html(publisher_id=publisher_id, phase="after_fetch")
-            self._audit(
-                "invite_click_skipped_duplicate",
-                click_seq=self._click_seq,
-                publisher_id=publisher_id,
-                html_before_path=html_before_path,
-                html_after_path=html_after_path,
-            )
-            return False
+        # 在点击前保存快照
+        html_before = self._save_snapshot(publisher_id, "before_click")
+        self._audit(
+            "snapshot_before_click",
+            click_seq=self._click_seq,
+            publisher_id=publisher_id,
+            html_path=html_before,
+        )
 
         # 查找对应的邀请按钮
         invite_link = self.tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
         if not invite_link:
             logger.warning(f"找不到 publisher ID: {publisher_id} 的邀请按钮，尝试重新获取页面元素")
+            # 保存失败时的快照
+            html_fail = self._save_snapshot(publisher_id, "button_not_found")
             self._audit(
                 "invite_button_missing",
                 click_seq=self._click_seq,
                 publisher_id=publisher_id,
                 after_refresh=False,
+                html_path=html_fail,
             )
             self.refresh_tab()
             invite_link = self.tab.ele(f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2)
@@ -448,6 +429,8 @@ class AwinRPA:
         try:
             invite_link.click()
         except Exception as e:
+            # 保存点击失败时的快照
+            html_fail = self._save_snapshot(publisher_id, "click_failed")
             self._audit(
                 "invite_click_failed",
                 click_seq=self._click_seq,
@@ -459,19 +442,23 @@ class AwinRPA:
                     "aria-disabled": invite_link.attr("aria-disabled"),
                     "href": invite_link.attr("href"),
                 },
+                html_path=html_fail,
             )
             return False
 
-        # 输入邀请信息（等待弹窗/输入框真正出现，避免“按钮已失效但元素仍在”的情况）
+        # 输入邀请信息（等待弹窗/输入框真正出现，避免"按钮已失效但元素仍在"的情况）
         try:
             custom_message = self.tab.ele("#customMessage", timeout=8)
             if not custom_message:
+                # 保存找不到输入框时的快照
+                html_fail = self._save_snapshot(publisher_id, "no_input_box")
                 self._audit(
                     "invite_click_failed",
                     click_seq=self._click_seq,
                     publisher_id=publisher_id,
                     stage="wait_custom_message",
                     error="customMessage_not_found",
+                    html_path=html_fail,
                 )
                 return False
             custom_message.input(msg)
@@ -533,10 +520,13 @@ class AwinRPA:
             )
             return False
 
+        # 保存成功发送后的快照
+        html_after = self._save_snapshot(publisher_id, "after_click")
         self._audit(
             "invite_sent_success",
             click_seq=self._click_seq,
             publisher_id=publisher_id,
+            html_path=html_after,
         )
         if publisher_id not in self._clicked_publisher_ids:
             self._clicked_publisher_ids.add(publisher_id)
@@ -551,35 +541,54 @@ class AwinRPA:
         msg: 申请信息内容
         """
         sent_count = 0  # 已发送的邀请数量
-        
+        page_sent_count = 0  # 当前页面已发送的邀请数量
+        page_limit = 40  # 每页最多发送40个邀请
+
         while sent_count < invite_count:
             publisher_ids = self.get_publisher_ids()
-            
+
             if not publisher_ids:
                 logger.info("当前页面没有可邀请的 publisher，尝试下一页")
                 self.click_next_page()
+                page_sent_count = 0  # 重置当前页面计数
                 continue
-            
+
             logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
-            console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请[/bold blue]")
-            
+            console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请 (当前页面: {page_sent_count}/{page_limit})[/bold blue]")
+
             # 逐个处理
             processed_any = False
             for publisher_id in publisher_ids:
                 if sent_count >= invite_count:
                     break
-                    
+
+                # 如果当前页面已发送40个邀请，跳转到下一页
+                if page_sent_count >= page_limit:
+                    logger.info(f"当前页面已发送 {page_sent_count} 个邀请，进入下一页")
+                    self.click_next_page()
+                    page_sent_count = 0  # 重置当前页面计数
+                    break
+
                 success = self.send_invite_to_publisher(publisher_id, msg)
                 if success:
                     sent_count += 1
+                    page_sent_count += 1
                     processed_any = True
-                    console.print(f"[green]✅ 已发送 {sent_count}/{invite_count}[/green]")
-            
+                    console.print(f"[green]✅ 已发送 {sent_count}/{invite_count} (当前页面: {page_sent_count}/{page_limit})[/green]")
+
+            # 如果当前页面已发送40个邀请，跳转到下一页
+            if page_sent_count >= page_limit:
+                logger.info(f"当前页面已发送 {page_sent_count} 个邀请，进入下一页")
+                self.click_next_page()
+                page_sent_count = 0  # 重置当前页面计数
+                continue
+
             # 如果这一轮没有成功处理任何一个，说明列表已经空了或都失效了，进入下一页
             if not processed_any:
                 logger.info("当前页面所有按钮都已失效，进入下一页")
                 self.click_next_page()
-        
+                page_sent_count = 0  # 重置当前页面计数
+
         console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
 
 
