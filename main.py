@@ -284,6 +284,16 @@ class AwinRPA:
             **extra,
         ).info(event)
 
+    def _notify(self, title: str, message: str):
+        try:
+            from plyer import notification
+            notification.notify(title=title, message=message, app_name="Awin RPA", timeout=5)
+        except Exception:
+            try:
+                logger.info(f"[通知]{title}: {message}")
+            except Exception:
+                pass
+
     def _safe_get_html(self) -> str:
         try:
             html = getattr(self.tab, "html", None)
@@ -452,6 +462,7 @@ class AwinRPA:
                     publisher_id=publisher_id,
                     after_refresh=True,
                 )
+                self._notify("邀请失败", f"未找到按钮：publisher {publisher_id}")
                 return False
         
         logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
@@ -474,6 +485,7 @@ class AwinRPA:
                 },
                 html_path=html_fail,
             )
+            self._notify("邀请失败", f"点击失败：publisher {publisher_id}")
             return False
 
         # 输入邀请信息（等待弹窗/输入框真正出现，避免"按钮已失效但元素仍在"的情况）
@@ -490,6 +502,7 @@ class AwinRPA:
                     error="customMessage_not_found",
                     html_path=html_fail,
                 )
+                self._notify("邀请失败", f"未找到输入框：publisher {publisher_id}")
                 return False
             custom_message.input(msg)
         except Exception as e:
@@ -500,6 +513,7 @@ class AwinRPA:
                 stage="input_message",
                 error=str(e),
             )
+            self._notify("邀请失败", f"填写信息失败：publisher {publisher_id}")
             return False
 
         # 等待 send invite 按钮可点击，然后点击
@@ -513,6 +527,7 @@ class AwinRPA:
                     stage="wait_send_button",
                     error="send_button_not_found",
                 )
+                self._notify("邀请失败", f"未找到发送按钮：publisher {publisher_id}")
                 return False
             send_btn.wait.clickable(timeout=10)
             send_btn.click()
@@ -524,6 +539,7 @@ class AwinRPA:
                 stage="click_send_button",
                 error=str(e),
             )
+            self._notify("邀请失败", f"点击发送失败：publisher {publisher_id}")
             return False
 
         # 等待弹窗出现并关闭
@@ -537,6 +553,7 @@ class AwinRPA:
                     stage="wait_popup_ok",
                     error="popup_ok_not_found",
                 )
+                self._notify("邀请失败", f"未出现确认弹窗：publisher {publisher_id}")
                 return False
             popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
             popup_ok_btn.click()
@@ -548,6 +565,7 @@ class AwinRPA:
                 stage="close_popup_ok",
                 error=str(e),
             )
+            self._notify("邀请失败", f"关闭弹窗失败：publisher {publisher_id}")
             return False
 
         # 保存成功发送后的快照
@@ -558,6 +576,7 @@ class AwinRPA:
             publisher_id=publisher_id,
             html_path=html_after,
         )
+        self._notify("邀请成功", f"已发送给 publisher {publisher_id}")
         if publisher_id not in self._clicked_publisher_ids:
             self._clicked_publisher_ids.add(publisher_id)
             _append_new_ids(CLICKED_IDS_PATH, [publisher_id])
@@ -606,6 +625,7 @@ class AwinRPA:
                 self.click_next_page()
 
         console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
+        self._notify("任务完成", f"已成功发送 {sent_count} 条邀请")
 
 
 class AppUI:
@@ -781,7 +801,14 @@ class AppUI:
         invite_count, msg = self.get_user_input()
         
         console.print("\n[bold green]🚀 开始执行 RPA...[/bold green]")
-        self.rpa.run(invite_count=invite_count, msg=msg)
+        try:
+            self.rpa.run(invite_count=invite_count, msg=msg)
+        except Exception as e:
+            try:
+                self.rpa._notify("任务失败", f"执行异常：{e}")
+            except Exception:
+                pass
+            raise
         console.print("\n[bold green]✅ 执行完成![/bold green]")
 
 
