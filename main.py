@@ -261,7 +261,7 @@ class AwinRPA:
     
     def __init__(self):
         self.browser = Chromium()
-        self.tab = self.browser.latest_tab
+        self.tab = self._select_awin_tab()
         self.message_manager = MessageManager()
         self._fetch_seq = 0
         self._click_seq = 0
@@ -324,9 +324,39 @@ class AwinRPA:
         """
         return self._dump_html(publisher_id, phase)
     
+    def _select_awin_tab(self):
+        """
+        选择 URL 中包含 'awin' 的标签页；若未找到则回退为最新标签页
+        """
+        try:
+            tabs = getattr(self.browser, "tabs", None)
+            if tabs:
+                for t in tabs:
+                    try:
+                        url = getattr(t, "url", None)
+                        if isinstance(url, str) and "awin" in url.lower():
+                            return t
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            get_tabs = getattr(self.browser, "get_tabs", None)
+            if callable(get_tabs):
+                for t in get_tabs():
+                    try:
+                        url = getattr(t, "url", None)
+                        if isinstance(url, str) and "awin" in url.lower():
+                            return t
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return getattr(self.browser, "latest_tab", None)
+    
     def refresh_tab(self):
         """重新获取当前浏览器标签页（不刷新页面）"""
-        self.tab = self.browser.latest_tab
+        self.tab = self._select_awin_tab()
     
     def goto_page(self, url: str = None):
         """跳转到邀请页面"""
@@ -759,5 +789,4 @@ if __name__ == "__main__":
     rpa = AwinRPA()
     app = AppUI(rpa)
     app.start()
-
 
