@@ -48,6 +48,9 @@ import json
 from pathlib import Path
 import pyperclip
 from datetime import datetime, timezone
+import re
+from dulwich import porcelain
+from dulwich.repo import Repo
 
 console = Console()
 logger.add("file.log")
@@ -94,6 +97,129 @@ logger.add(
     filter=_audit_filter,
     level="INFO",
 )
+
+
+class VersionManager:
+    """版本管理器 - 使用 Dulwich 进行 Git 操作"""
+    
+    def __init__(self, repo_path: Path = None):
+        self.repo_path = repo_path or Path(__file__).parent
+        self.pyproject_path = self.repo_path / "pyproject.toml"
+    
+    def get_current_version(self) -> str:
+        """从 pyproject.toml 获取当前版本"""
+        try:
+            if self.pyproject_path.exists():
+                content = self.pyproject_path.read_text(encoding="utf-8")
+                match = re.search(r'version\s*=\s*"([^"]+)"', content)
+                if match:
+                    return match.group(1)
+        except Exception as e:
+            logger.error(f"读取版本失败: {e}")
+        return "0.1.0"
+    
+    def update_version(self, new_version: str) -> bool:
+        """
+        更新 pyproject.toml 中的版本号
+        返回 True 表示成功，False 表示失败
+        """
+        try:
+            if not self.pyproject_path.exists():
+                console.print("[red]❌ 找不到 pyproject.toml 文件[/red]")
+                return False
+            
+            # 验证版本格式
+            if not re.match(r'^\d+\.\d+\.\d+$', new_version):
+                console.print("[red]❌ 版本号格式无效，应该是 x.y.z 格式[/red]")
+                return False
+            
+            # 读取文件内容
+            content = self.pyproject_path.read_text(encoding="utf-8")
+            
+            # 替换版本号
+            new_content = re.sub(
+                r'(version\s*=\s*)"([^"]+)"',
+                f'\\1"{new_version}"',
+                content
+            )
+            
+            if new_content == content:
+                console.print("[yellow]⚠️ 未找到版本号字段[/yellow]")
+                return False
+            
+            # 写入文件
+            self.pyproject_path.write_text(new_content, encoding="utf-8")
+            console.print(f"[green]✅ 版本已更新为: {new_version}[/green]")
+            return True
+        except Exception as e:
+            logger.error(f"更新版本失败: {e}")
+            console.print(f"[red]❌ 更新版本失败: {e}[/red]")
+            return False
+    
+    def commit_version_change(self, version: str) -> bool:
+        """
+        使用 Dulwich 提交版本更改
+        返回 True 表示成功，False 表示失败
+        """
+        try:
+            repo = Repo(str(self.repo_path))
+        except Exception as e:
+            logger.error(f"无法打开 Git 仓库: {e}")
+            console.print(f"[red]❌ 目录不是一个 Git 仓库或无法访问[/red]")
+            return False
+        
+        try:
+            # 添加文件到暂存区
+            porcelain.add(repo, [self.pyproject_path.name])
+            
+            # 获取 Git 配置的作者信息，如果没有则使用默认值
+            try:
+                config = repo.get_config()
+                author_name = config.get((b"user",), b"name")
+                author_email = config.get((b"user",), b"email")
+                if author_name and author_email:
+                    author = f"{author_name.decode('utf-8')} <{author_email.decode('utf-8')}>".encode("utf-8")
+                else:
+                    author = b"Awin RPA Bot <bot@awin-rpa.local>"
+            except Exception:
+                author = b"Awin RPA Bot <bot@awin-rpa.local>"
+            
+            # 提交更改
+            commit_message = f"chore: bump version to {version}"
+            porcelain.commit(
+                repo,
+                message=commit_message.encode("utf-8"),
+                author=author,
+                committer=author
+            )
+            
+            console.print(f"[green]✅ 已提交版本更新: {commit_message}[/green]")
+            return True
+        except Exception as e:
+            logger.error(f"提交版本更改失败: {e}")
+            console.print(f"[red]❌ 提交失败: {e}[/red]")
+            return False
+    
+    def get_git_status(self) -> dict:
+        """获取 Git 仓库状态"""
+        try:
+            repo = Repo(str(self.repo_path))
+            status = porcelain.status(repo)
+            
+            # 收集所有暂存的文件，包括添加、修改、删除等
+            staged_files = []
+            for change_type in ["add", "modify", "delete"]:
+                if change_type in status.staged:
+                    staged_files.extend([f.decode("utf-8") for f in status.staged[change_type]])
+            
+            return {
+                "staged": staged_files,
+                "unstaged": [f.decode("utf-8") for f in status.unstaged],
+                "untracked": [f.decode("utf-8") for f in status.untracked],
+            }
+        except Exception as e:
+            logger.error(f"获取 Git 状态失败: {e}")
+            return {"staged": [], "unstaged": [], "untracked": []}
 
 
 class MessageManager:
@@ -638,6 +764,135 @@ class AppUI:
     def __init__(self, rpa: AwinRPA):
         self.rpa = rpa
         self.message_manager = rpa.message_manager
+        self.version_manager = VersionManager()
+    
+    def version_mode(self):
+        """版本管理模式"""
+        console.print(Panel.fit(
+            "[bold cyan]📦 版本管理[/bold cyan]",
+            border_style="cyan"
+        ))
+        
+        current_version = self.version_manager.get_current_version()
+        console.print(f"\n[bold]当前版本:[/bold] [green]{current_version}[/green]\n")
+        
+        # 显示 Git 状态
+        status = self.version_manager.get_git_status()
+        if status["unstaged"] or status["untracked"]:
+            console.print("[yellow]⚠️ 有未提交的更改:[/yellow]")
+            for f in status["unstaged"]:
+                console.print(f"  [dim]修改: {f}[/dim]")
+            for f in status["untracked"]:
+                console.print(f"  [dim]未跟踪: {f}[/dim]")
+            console.print()
+        
+        action = questionary.select(
+            "请选择操作:",
+            choices=[
+                "📝 更新版本号",
+                "📊 查看 Git 状态",
+                "🔙 返回主菜单"
+            ]
+        ).ask()
+        
+        if action is None or "返回" in action:
+            return
+        elif "更新版本" in action:
+            self._update_version_flow(current_version)
+        elif "查看" in action:
+            self._display_git_status()
+    
+    def _update_version_flow(self, current_version: str):
+        """版本更新流程"""
+        console.print(f"\n[bold]当前版本:[/bold] {current_version}")
+        
+        # 解析当前版本
+        parts = current_version.split(".")
+        if len(parts) != 3:
+            console.print("[red]❌ 当前版本格式无效[/red]")
+            return
+        
+        try:
+            major, minor, patch = map(int, parts)
+        except ValueError:
+            console.print("[red]❌ 当前版本包含非数字字符，无法解析[/red]")
+            return
+        
+        # 提供版本更新选项
+        choices = [
+            f"主版本 (Major): {major + 1}.0.0",
+            f"次版本 (Minor): {major}.{minor + 1}.0",
+            f"补丁版本 (Patch): {major}.{minor}.{patch + 1}",
+            "自定义版本号",
+            "取消"
+        ]
+        
+        selection = questionary.select(
+            "请选择版本更新类型:",
+            choices=choices
+        ).ask()
+        
+        if selection is None or "取消" in selection:
+            return
+        
+        if "自定义" in selection:
+            new_version = questionary.text(
+                "请输入新版本号 (格式: x.y.z):",
+                validate=lambda x: True if re.match(r'^\d+\.\d+\.\d+$', x) else "版本号格式应为 x.y.z"
+            ).ask()
+            if not new_version:
+                return
+        else:
+            # 从选项中提取版本号
+            new_version = selection.split(": ")[1]
+        
+        # 确认更新
+        confirm = questionary.confirm(
+            f"确认将版本从 {current_version} 更新到 {new_version}?",
+            default=True
+        ).ask()
+        
+        if not confirm:
+            console.print("[yellow]已取消[/yellow]")
+            return
+        
+        # 更新版本
+        if self.version_manager.update_version(new_version):
+            # 询问是否提交
+            commit = questionary.confirm(
+                "是否使用 Git 提交此更改?",
+                default=True
+            ).ask()
+            
+            if commit:
+                self.version_manager.commit_version_change(new_version)
+    
+    def _display_git_status(self):
+        """显示 Git 状态"""
+        status = self.version_manager.get_git_status()
+        
+        console.print("\n[bold cyan]📊 Git 仓库状态:[/bold cyan]\n")
+        
+        if status["staged"]:
+            console.print("[green]已暂存的更改:[/green]")
+            for f in status["staged"]:
+                console.print(f"  [green]✓[/green] {f}")
+            console.print()
+        
+        if status["unstaged"]:
+            console.print("[yellow]未暂存的更改:[/yellow]")
+            for f in status["unstaged"]:
+                console.print(f"  [yellow]M[/yellow] {f}")
+            console.print()
+        
+        if status["untracked"]:
+            console.print("[dim]未跟踪的文件:[/dim]")
+            for f in status["untracked"]:
+                console.print(f"  [dim]?[/dim] {f}")
+            console.print()
+        
+        if not any([status["staged"], status["unstaged"], status["untracked"]]):
+            console.print("[green]✅ 工作目录干净[/green]\n")
     
     def settings_mode(self):
         """设置模式 - 管理邀请信息"""
@@ -761,6 +1016,7 @@ class AppUI:
             choices=[
                 "🚀 开始执行 RPA",
                 "⚙️ 设置模式 (管理邀请信息)",
+                "📦 版本管理",
                 "❌ 退出"
             ]
         ).ask()
@@ -771,6 +1027,10 @@ class AppUI:
         
         if "设置" in action:
             self.settings_mode()
+            return self.get_user_input()
+        
+        if "版本" in action:
+            self.version_mode()
             return self.get_user_input()
         
         invite_count = questionary.text(

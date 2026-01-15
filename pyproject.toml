@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.2",
     "drissionpage>=4.1.1.2",
+    "dulwich>=0.25.2",
     "html5lib>=1.1",
     "loguru>=0.7.3",
     "pandas>=2.3.3",
