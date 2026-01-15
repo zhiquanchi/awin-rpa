@@ -603,7 +603,7 @@ class AwinRPA:
             logger.info(f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher")
             console.print(f"\n[bold blue]📧 已发送 {sent_count}/{invite_count} 条邀请[/bold blue]")
 
-            # 找到第一个未发送过的 ID 并发送
+            # 遍历所有 ID，找到第一个未发送过的并发送（发送成功后会重新获取 ID）
             found_new = False
             for publisher_id in publisher_ids:
                 if sent_count >= invite_count:
@@ -615,9 +615,9 @@ class AwinRPA:
                     continue
 
                 # 找到一个未发送的 ID，发送邀约
-                found_new = True
                 success = self.send_invite_to_publisher(publisher_id, msg)
                 if success:
+                    found_new = True
                     sent_count += 1
                     console.print(f"[green]✅ 已发送 {sent_count}/{invite_count}[/green]")
                     # 发送成功后立即跳出内层循环，重新获取页面上的所有 ID
