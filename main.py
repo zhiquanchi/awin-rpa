@@ -170,7 +170,7 @@ class VersionManager:
         
         try:
             # 添加文件到暂存区
-            porcelain.add(repo, [str(self.pyproject_path.relative_to(self.repo_path))])
+            porcelain.add(repo, [self.pyproject_path.name])
             
             # 获取 Git 配置的作者信息，如果没有则使用默认值
             try:
@@ -838,7 +838,7 @@ class AppUI:
         if "自定义" in selection:
             new_version = questionary.text(
                 "请输入新版本号 (格式: x.y.z):",
-                validate=lambda x: bool(re.match(r'^\d+\.\d+\.\d+$', x)) or "版本号格式应为 x.y.z"
+                validate=lambda x: True if re.match(r'^\d+\.\d+\.\d+$', x) else "版本号格式应为 x.y.z"
             ).ask()
             if not new_version:
                 return
