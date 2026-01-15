@@ -163,17 +163,34 @@ class VersionManager:
         """
         try:
             repo = Repo(str(self.repo_path))
-            
+        except Exception as e:
+            logger.error(f"无法打开 Git 仓库: {e}")
+            console.print(f"[red]❌ 目录不是一个 Git 仓库或无法访问[/red]")
+            return False
+        
+        try:
             # 添加文件到暂存区
             porcelain.add(repo, [str(self.pyproject_path.relative_to(self.repo_path))])
+            
+            # 获取 Git 配置的作者信息，如果没有则使用默认值
+            try:
+                config = repo.get_config()
+                author_name = config.get((b"user",), b"name")
+                author_email = config.get((b"user",), b"email")
+                if author_name and author_email:
+                    author = f"{author_name.decode('utf-8')} <{author_email.decode('utf-8')}>".encode("utf-8")
+                else:
+                    author = b"Awin RPA Bot <bot@awin-rpa.local>"
+            except Exception:
+                author = b"Awin RPA Bot <bot@awin-rpa.local>"
             
             # 提交更改
             commit_message = f"chore: bump version to {version}"
             porcelain.commit(
                 repo,
                 message=commit_message.encode("utf-8"),
-                author=b"Awin RPA Bot <bot@awin-rpa.local>",
-                committer=b"Awin RPA Bot <bot@awin-rpa.local>"
+                author=author,
+                committer=author
             )
             
             console.print(f"[green]✅ 已提交版本更新: {commit_message}[/green]")
@@ -188,8 +205,15 @@ class VersionManager:
         try:
             repo = Repo(str(self.repo_path))
             status = porcelain.status(repo)
+            
+            # 收集所有暂存的文件，包括添加、修改、删除等
+            staged_files = []
+            for change_type in ["add", "modify", "delete"]:
+                if change_type in status.staged:
+                    staged_files.extend([f.decode("utf-8") for f in status.staged[change_type]])
+            
             return {
-                "staged": [f.decode("utf-8") for f in status.staged["add"]],
+                "staged": staged_files,
                 "unstaged": [f.decode("utf-8") for f in status.unstaged],
                 "untracked": [f.decode("utf-8") for f in status.untracked],
             }
@@ -788,7 +812,11 @@ class AppUI:
             console.print("[red]❌ 当前版本格式无效[/red]")
             return
         
-        major, minor, patch = map(int, parts)
+        try:
+            major, minor, patch = map(int, parts)
+        except ValueError:
+            console.print("[red]❌ 当前版本包含非数字字符，无法解析[/red]")
+            return
         
         # 提供版本更新选项
         choices = [
