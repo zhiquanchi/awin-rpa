@@ -13,5 +13,8 @@ seen_publisher_ids.txt
 clicked_publisher_ids.txt
 html_dumps/
 
+# JSON configuration files
+invitation_messages.json
+
 # Virtual environments
 .venv
