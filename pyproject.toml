@@ -15,4 +15,5 @@ dependencies = [
     "questionary>=2.0.1",
     "rich>=13.7.0",
     "plyer>=2.1.0",
+    "textual>=3.0.0",
 ]
