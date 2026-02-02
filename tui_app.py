@@ -6,6 +6,7 @@ AWIN RPA - 模板管理和预览 TUI 界面
 from datetime import datetime
 from pathlib import Path
 import json
+import pyperclip
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import (
@@ -28,6 +29,25 @@ from textual import work
 # 导入 main.py 中的类
 from main import MessageManager, AwinRPA
 from loguru import logger
+
+
+class PasteableTextArea(TextArea):
+    """支持 Ctrl+V 粘贴的 TextArea"""
+    
+    BINDINGS = [
+        Binding("ctrl+v", "paste", "粘贴", show=False),
+    ]
+    
+    def action_paste(self) -> None:
+        """粘贴剪贴板内容"""
+        if self.read_only:
+            return
+        try:
+            text = pyperclip.paste()
+            if text:
+                self.insert(text)
+        except Exception:
+            pass
 
 
 class ConfigManager:
@@ -288,7 +308,7 @@ class TemplateManagerApp(App):
                 # 中间：模板预览
                 with Vertical(id="template-preview-wrapper"):
                     yield Static("模板内容预览", classes="section-label")
-                    yield TextArea(
+                    yield PasteableTextArea(
                         "",
                         id="template-preview",
                         read_only=True,
@@ -384,7 +404,7 @@ class TemplateManagerApp(App):
 
     def _update_preview(self) -> None:
         """更新预览内容"""
-        preview = self.query_one("#template-preview", TextArea)
+        preview = self.query_one("#template-preview", PasteableTextArea)
         if self.selected_template:
             preview.load_text(self.selected_template.content)
         else:
@@ -586,7 +606,7 @@ class TemplateManagerApp(App):
         self.editing_content = self.selected_template.content
 
         # 切换预览区域为可编辑
-        preview = self.query_one("#template-preview", TextArea)
+        preview = self.query_one("#template-preview", PasteableTextArea)
         preview.read_only = False
         preview.focus()
 
@@ -600,7 +620,7 @@ class TemplateManagerApp(App):
         if not self.is_template_editing or not self.selected_template:
             return
 
-        preview = self.query_one("#template-preview", TextArea)
+        preview = self.query_one("#template-preview", PasteableTextArea)
         self.selected_template.content = preview.text
         self._save_templates()  # 保存到配置文件
         preview.read_only = True
@@ -619,7 +639,7 @@ class TemplateManagerApp(App):
         if not self.is_template_editing:
             return
 
-        preview = self.query_one("#template-preview", TextArea)
+        preview = self.query_one("#template-preview", PasteableTextArea)
         preview.load_text(self.selected_template.content if self.selected_template else "")
         preview.read_only = True
 
