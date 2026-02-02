@@ -36,7 +36,7 @@
 
 /* 左侧：模板列表 */
 #template-list-wrapper {
-    width: 30;
+    width: 36;
     height: 100%;
     margin-right: 2;
 }
@@ -62,14 +62,12 @@
 #template-list-buttons {
     height: auto;
     margin-top: 1;
+    width: 100%;
 }
 
 #template-list-buttons Button {
     width: 1fr;
-    margin-right: 1;
-}
-
-#template-list-buttons Button:last-child {
+    min-width: 8;
     margin-right: 0;
 }
 
@@ -179,6 +177,11 @@
     align: center middle;
 }
 
+.btn-connect {
+    min-width: 14;
+    margin-left: 1;
+}
+
 .btn-large {
     min-width: 16;
     min-height: 3;
@@ -218,6 +221,15 @@
     text-style: bold;
     background: $surface-lighten-1;
     border-bottom: solid $primary;
+}
+
+#log-status {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-2;
 }
 
 #log-content {
