@@ -27,7 +27,7 @@ from textual.screen import ModalScreen
 from textual import work
 
 # 导入 main.py 中的类
-from main import MessageManager, AwinRPA, _load_id_set, CLICKED_IDS_PATH
+from main import MessageManager, AwinRPA, Updater, _load_id_set, CLICKED_IDS_PATH
 from loguru import logger
 
 
@@ -371,6 +371,9 @@ class TemplateManagerApp(App):
                     yield Button(
                         "重置记录", id="btn-reset-clicked", variant="warning", classes="btn-reset"
                     )
+                    yield Button(
+                        "检查更新", id="btn-check-update", variant="primary", classes="btn-update"
+                    )
 
                 # 中间：日志区域
                 with Vertical(id="log-wrapper"):
@@ -476,8 +479,94 @@ class TemplateManagerApp(App):
             self.action_start_execution()
         elif button_id == "btn-reset-clicked":
             self.action_reset_clicked()
+        elif button_id == "btn-check-update":
+            self.action_check_update()
         elif button_id == "btn-quit":
             self.action_request_quit()
+
+    def action_check_update(self) -> None:
+        """检查更新"""
+        self._add_log("info", "正在检查更新...")
+        self._check_update_worker()
+
+    @work(exclusive=True, thread=True)
+    def _check_update_worker(self) -> None:
+        """后台检查更新"""
+        try:
+            updater = Updater()
+            result = updater.check_for_updates()
+
+            if result["error"]:
+                self.call_from_thread(self._add_log, "error", f"检查失败: {result['error']}")
+                return
+
+            if not result["has_update"]:
+                self.call_from_thread(
+                    self._add_log, "success",
+                    f"已是最新版本 ({result['local_version']})"
+                )
+                self.call_from_thread(
+                    self.notify,
+                    f"当前已是最新版本 ({result['local_version']})"
+                )
+                return
+
+            # 有更新，弹出确认框
+            self.call_from_thread(
+                self._add_log, "info",
+                f"发现新版本: {result['local_version']} → {result['remote_version']}"
+            )
+            self.call_from_thread(
+                self.push_screen,
+                ConfirmDialog(
+                    title="发现新版本",
+                    message=f"{result['local_version']} → {result['remote_version']}，是否更新？"
+                ),
+                self._handle_update_confirm
+            )
+        except Exception as e:
+            logger.error(f"检查更新出错: {e}")
+            self.call_from_thread(self._add_log, "error", f"检查更新出错: {e}")
+
+    def _handle_update_confirm(self, confirmed: bool) -> None:
+        """处理更新确认结果"""
+        if not confirmed:
+            self._add_log("info", "已取消更新")
+            return
+        self._add_log("info", "正在下载更新...")
+        self._download_update_worker()
+
+    @work(exclusive=True, thread=True)
+    def _download_update_worker(self) -> None:
+        """后台下载更新文件"""
+        try:
+            updater = Updater()
+
+            def on_progress(filename, index, total):
+                self.call_from_thread(
+                    self._add_log, "info",
+                    f"[{index}/{total}] 正在更新 {filename}..."
+                )
+
+            result = updater.download_updates(on_progress=on_progress)
+
+            if result["success"]:
+                self.call_from_thread(self._add_log, "success", result["message"])
+                self.call_from_thread(
+                    self.notify,
+                    "更新完成，请重新启动程序以生效",
+                    severity="information"
+                )
+            else:
+                self.call_from_thread(self._add_log, "error", result["message"])
+                self.call_from_thread(
+                    self.notify,
+                    "更新失败，已回滚",
+                    severity="error"
+                )
+        except Exception as e:
+            logger.error(f"下载更新出错: {e}")
+            self.call_from_thread(self._add_log, "error", f"下载更新出错: {e}")
 
     def action_reset_clicked(self) -> None:
         """重置已点击记录（显示确认弹窗）"""

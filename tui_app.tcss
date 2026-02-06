@@ -187,6 +187,11 @@
     margin-left: 1;
 }
 
+.btn-update {
+    min-width: 12;
+    margin-left: 1;
+}
+
 .btn-large {
     min-width: 16;
     min-height: 3;

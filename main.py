@@ -49,6 +49,9 @@ from pathlib import Path
 import pyperclip
 from datetime import datetime, timezone
 import re
+import shutil
+import urllib.request
+import urllib.error
 from dulwich import porcelain
 from dulwich.repo import Repo
 
@@ -220,6 +223,118 @@ class VersionManager:
         except Exception as e:
             logger.error(f"获取 Git 状态失败: {e}")
             return {"staged": [], "unstaged": [], "untracked": []}
+
+
+class Updater:
+    """自动更新器 - 通过 GitHub Raw URL 检查版本并下载更新文件"""
+
+    GITHUB_REPO = "zhiquanchi/awin-rpa"
+    GITHUB_BRANCH = "master"
+    RAW_BASE_URL = "https://raw.githubusercontent.com"
+    UPDATE_FILES = ["main.py", "tui_app.py", "tui_app.tcss", "pyproject.toml"]
+    TIMEOUT = 15  # 网络请求超时（秒）
+
+    def __init__(self, base_dir: Path = None):
+        self.base_dir = base_dir or Path(__file__).parent
+        self.version_manager = VersionManager(self.base_dir)
+
+    def _raw_url(self, filename: str) -> str:
+        """构造 GitHub Raw 文件 URL"""
+        return f"{self.RAW_BASE_URL}/{self.GITHUB_REPO}/{self.GITHUB_BRANCH}/{filename}"
+
+    @staticmethod
+    def _parse_version(text: str) -> str | None:
+        """从 pyproject.toml 内容中解析 version 字段"""
+        match = re.search(r'version\s*=\s*"([^"]+)"', text)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _version_tuple(ver: str) -> tuple[int, ...]:
+        """将版本号字符串转为可比较的元组"""
+        try:
+            return tuple(int(x) for x in ver.split("."))
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
+    def check_for_updates(self) -> dict:
+        """
+        检查是否有新版本可用。
+        返回 {"has_update": bool, "local_version": str, "remote_version": str, "error": str|None}
+        """
+        local_version = self.version_manager.get_current_version()
+        try:
+            url = self._raw_url("pyproject.toml")
+            req = urllib.request.Request(url, headers={"User-Agent": "AwinRPA-Updater"})
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
+                content = resp.read().decode("utf-8")
+        except urllib.error.URLError as e:
+            logger.error(f"检查更新失败（网络错误）: {e}")
+            return {"has_update": False, "local_version": local_version, "remote_version": "", "error": f"无法连接 GitHub: {e}"}
+        except Exception as e:
+            logger.error(f"检查更新失败: {e}")
+            return {"has_update": False, "local_version": local_version, "remote_version": "", "error": str(e)}
+
+        remote_version = self._parse_version(content)
+        if not remote_version:
+            return {"has_update": False, "local_version": local_version, "remote_version": "", "error": "无法解析远程版本号"}
+
+        has_update = self._version_tuple(remote_version) > self._version_tuple(local_version)
+        return {"has_update": has_update, "local_version": local_version, "remote_version": remote_version, "error": None}
+
+    def download_updates(self, on_progress=None) -> dict:
+        """
+        下载并覆盖代码文件。
+        on_progress: 可选回调函数 (filename: str, index: int, total: int) -> None
+        返回 {"success": bool, "updated_files": list[str], "message": str}
+        """
+        backup_map: dict[str, Path] = {}  # 原文件 -> 备份路径
+        updated: list[str] = []
+        total = len(self.UPDATE_FILES)
+
+        try:
+            for idx, filename in enumerate(self.UPDATE_FILES):
+                if on_progress:
+                    on_progress(filename, idx + 1, total)
+
+                target = self.base_dir / filename
+                backup = self.base_dir / f"{filename}.bak"
+
+                # 备份旧文件（如果存在）
+                if target.exists():
+                    shutil.copy2(target, backup)
+                    backup_map[filename] = backup
+
+                # 下载新文件
+                url = self._raw_url(filename)
+                req = urllib.request.Request(url, headers={"User-Agent": "AwinRPA-Updater"})
+                with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
+                    data = resp.read()
+
+                target.write_bytes(data)
+                updated.append(filename)
+                logger.info(f"已更新文件: {filename}")
+
+            # 全部成功，删除备份文件
+            for bak_path in backup_map.values():
+                try:
+                    bak_path.unlink()
+                except Exception:
+                    pass
+
+            new_version = self.version_manager.get_current_version()
+            return {"success": True, "updated_files": updated, "message": f"更新成功，新版本: {new_version}，请重新启动程序以生效。"}
+
+        except Exception as e:
+            logger.error(f"下载更新失败: {e}")
+            # 回滚：将备份文件恢复
+            for filename, bak_path in backup_map.items():
+                target = self.base_dir / filename
+                try:
+                    shutil.copy2(bak_path, target)
+                    bak_path.unlink()
+                except Exception:
+                    pass
+            return {"success": False, "updated_files": [], "message": f"更新失败，已回滚: {e}"}
 
 
 class MessageManager:
@@ -777,6 +892,7 @@ class AppUI:
         self.rpa = rpa
         self.message_manager = rpa.message_manager
         self.version_manager = VersionManager()
+        self.updater = Updater()
     
     def reset_clicked_mode(self):
         """重置已点击记录"""
@@ -802,6 +918,49 @@ class AppUI:
 
         cleared = self.rpa.reset_clicked_ids()
         console.print(f"[green]✅ 已成功清除 {cleared} 条已点击记录[/green]\n")
+
+    def check_update_mode(self):
+        """检查更新"""
+        console.print(Panel.fit(
+            "[bold cyan]🔍 检查更新[/bold cyan]",
+            border_style="cyan"
+        ))
+        console.print("\n[dim]正在连接 GitHub 检查新版本...[/dim]\n")
+
+        result = self.updater.check_for_updates()
+
+        if result["error"]:
+            console.print(f"[red]❌ {result['error']}[/red]\n")
+            return
+
+        if not result["has_update"]:
+            console.print(f"[green]✅ 当前已是最新版本 ({result['local_version']})[/green]\n")
+            return
+
+        console.print(f"[bold yellow]发现新版本！[/bold yellow]")
+        console.print(f"  当前版本: [red]{result['local_version']}[/red]")
+        console.print(f"  最新版本: [green]{result['remote_version']}[/green]\n")
+
+        confirm = questionary.confirm(
+            "是否立即更新？",
+            default=True
+        ).ask()
+
+        if not confirm:
+            console.print("[yellow]已取消更新[/yellow]\n")
+            return
+
+        console.print("\n[dim]正在下载更新...[/dim]")
+
+        def on_progress(filename, index, total):
+            console.print(f"  [{index}/{total}] 正在更新 {filename}...")
+
+        dl_result = self.updater.download_updates(on_progress=on_progress)
+
+        if dl_result["success"]:
+            console.print(f"\n[bold green]✅ {dl_result['message']}[/bold green]\n")
+        else:
+            console.print(f"\n[red]❌ {dl_result['message']}[/red]\n")
 
     def version_mode(self):
         """版本管理模式"""
@@ -1054,6 +1213,7 @@ class AppUI:
                 "🚀 开始执行 RPA",
                 "⚙️ 设置模式 (管理邀请信息)",
                 "🔄 重置已点击记录",
+                "🔍 检查更新",
                 "📦 版本管理",
                 "❌ 退出"
             ]
@@ -1069,6 +1229,10 @@ class AppUI:
         
         if "重置" in action:
             self.reset_clicked_mode()
+            return self.get_user_input()
+        
+        if "检查更新" in action:
+            self.check_update_mode()
             return self.get_user_input()
         
         if "版本" in action:
