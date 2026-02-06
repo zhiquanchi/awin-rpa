@@ -709,6 +709,18 @@ class AwinRPA:
         self.tab.wait(2, 3)
         return True
     
+    def reset_clicked_ids(self):
+        """重置已点击记录，清空内存集合和持久化文件"""
+        count = len(self._clicked_publisher_ids)
+        self._clicked_publisher_ids.clear()
+        try:
+            if CLICKED_IDS_PATH.exists():
+                CLICKED_IDS_PATH.write_text("", encoding="utf-8")
+        except Exception as e:
+            logger.error(f"清空已点击记录文件失败: {e}")
+        logger.info(f"已重置已点击记录，共清除 {count} 条")
+        return count
+
     def run(self, invite_count: int, msg: str):
         """
         执行 RPA 主流程
@@ -766,6 +778,31 @@ class AppUI:
         self.message_manager = rpa.message_manager
         self.version_manager = VersionManager()
     
+    def reset_clicked_mode(self):
+        """重置已点击记录"""
+        count = len(self.rpa._clicked_publisher_ids)
+        console.print(Panel.fit(
+            "[bold red]🔄 重置已点击记录[/bold red]",
+            border_style="red"
+        ))
+        console.print(f"\n[bold]当前已点击记录:[/bold] [yellow]{count}[/yellow] 条\n")
+
+        if count == 0:
+            console.print("[dim]当前没有已点击记录，无需重置。[/dim]\n")
+            return
+
+        confirm = questionary.confirm(
+            f"确认清空全部 {count} 条已点击记录？清空后可重新对这些 publisher 发送邀请。",
+            default=False
+        ).ask()
+
+        if not confirm:
+            console.print("[yellow]已取消重置[/yellow]\n")
+            return
+
+        cleared = self.rpa.reset_clicked_ids()
+        console.print(f"[green]✅ 已成功清除 {cleared} 条已点击记录[/green]\n")
+
     def version_mode(self):
         """版本管理模式"""
         console.print(Panel.fit(
@@ -1016,6 +1053,7 @@ class AppUI:
             choices=[
                 "🚀 开始执行 RPA",
                 "⚙️ 设置模式 (管理邀请信息)",
+                "🔄 重置已点击记录",
                 "📦 版本管理",
                 "❌ 退出"
             ]
@@ -1027,6 +1065,10 @@ class AppUI:
         
         if "设置" in action:
             self.settings_mode()
+            return self.get_user_input()
+        
+        if "重置" in action:
+            self.reset_clicked_mode()
             return self.get_user_input()
         
         if "版本" in action:

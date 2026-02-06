@@ -27,7 +27,7 @@ from textual.screen import ModalScreen
 from textual import work
 
 # 导入 main.py 中的类
-from main import MessageManager, AwinRPA
+from main import MessageManager, AwinRPA, _load_id_set, CLICKED_IDS_PATH
 from loguru import logger
 
 
@@ -368,6 +368,9 @@ class TemplateManagerApp(App):
                     yield Button(
                         "连接浏览器", id="btn-connect", variant="primary", classes="btn-connect"
                     )
+                    yield Button(
+                        "重置记录", id="btn-reset-clicked", variant="warning", classes="btn-reset"
+                    )
 
                 # 中间：日志区域
                 with Vertical(id="log-wrapper"):
@@ -471,8 +474,52 @@ class TemplateManagerApp(App):
             self.action_connect_browser()
         elif button_id == "btn-execute":
             self.action_start_execution()
+        elif button_id == "btn-reset-clicked":
+            self.action_reset_clicked()
         elif button_id == "btn-quit":
             self.action_request_quit()
+
+    def action_reset_clicked(self) -> None:
+        """重置已点击记录（显示确认弹窗）"""
+        if self._rpa is not None:
+            count = len(self._rpa._clicked_publisher_ids)
+        else:
+            # 未连接浏览器时，从文件读取记录数
+            count = len(_load_id_set(CLICKED_IDS_PATH))
+
+        if count == 0:
+            self.notify("当前没有已点击记录，无需重置", severity="warning")
+            return
+
+        self.push_screen(
+            ConfirmDialog(
+                title="重置已点击记录",
+                message=f"共 {count} 条记录，清空后可重新发送邀请。确认？"
+            ),
+            self._handle_reset_confirm
+        )
+
+    def _handle_reset_confirm(self, confirmed: bool) -> None:
+        """处理重置确认结果"""
+        if not confirmed:
+            return
+
+        if self._rpa is not None:
+            cleared = self._rpa.reset_clicked_ids()
+        else:
+            # 未连接浏览器时，直接清空文件
+            count = len(_load_id_set(CLICKED_IDS_PATH))
+            try:
+                if CLICKED_IDS_PATH.exists():
+                    CLICKED_IDS_PATH.write_text("", encoding="utf-8")
+            except Exception as e:
+                logger.error(f"清空已点击记录文件失败: {e}")
+                self.notify("重置失败", severity="error")
+                return
+            cleared = count
+
+        self._add_log("success", f"已清除 {cleared} 条已点击记录")
+        self.notify(f"已成功清除 {cleared} 条已点击记录")
 
     def action_connect_browser(self) -> None:
         """连接浏览器"""
