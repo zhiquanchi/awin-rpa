@@ -817,7 +817,6 @@ class AwinRPA:
             publisher_id=publisher_id,
             html_path=html_after,
         )
-        self._notify("邀请成功", f"已发送给 publisher {publisher_id}")
         if publisher_id not in self._clicked_publisher_ids:
             self._clicked_publisher_ids.add(publisher_id)
             _append_new_ids(CLICKED_IDS_PATH, [publisher_id])
