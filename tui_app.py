@@ -73,6 +73,8 @@ class ConfigManager:
             "send_count": 10,
             "selected_template_index": 0,
             "active_template_index": -1,  # -1 表示未激活任何模板
+            "notify_channel": "desktop",  # desktop | feishu | both | none
+            "feishu_webhook_url": "",
         }
     
     def save(self):
@@ -106,6 +108,30 @@ class ConfigManager:
     @active_template_index.setter
     def active_template_index(self, value: int):
         self._config["active_template_index"] = value
+        self.save()
+
+    @property
+    def notify_channel(self) -> str:
+        value = str(self._config.get("notify_channel", "desktop")).strip().lower()
+        if value in {"desktop", "feishu", "both", "none"}:
+            return value
+        return "desktop"
+
+    @notify_channel.setter
+    def notify_channel(self, value: str):
+        normalized = str(value).strip().lower()
+        if normalized not in {"desktop", "feishu", "both", "none"}:
+            normalized = "desktop"
+        self._config["notify_channel"] = normalized
+        self.save()
+
+    @property
+    def feishu_webhook_url(self) -> str:
+        return str(self._config.get("feishu_webhook_url", "")).strip()
+
+    @feishu_webhook_url.setter
+    def feishu_webhook_url(self, value: str):
+        self._config["feishu_webhook_url"] = str(value or "").strip()
         self.save()
 
 
@@ -230,6 +256,7 @@ class TemplateManagerApp(App):
     selected_template: reactive[Template | None] = reactive(None)
     is_template_editing: reactive[bool] = reactive(False)
     is_count_editing: reactive[bool] = reactive(False)
+    is_notify_editing: reactive[bool] = reactive(False)
     send_count: reactive[int] = reactive(10)
     is_running: reactive[bool] = reactive(False)
 
@@ -246,9 +273,13 @@ class TemplateManagerApp(App):
         
         # 从配置文件加载发送数量
         self.send_count = self.config_manager.send_count
+        self.notify_channel: str = self.config_manager.notify_channel
+        self.feishu_webhook_url: str = self.config_manager.feishu_webhook_url
         
         self.editing_content: str = ""
         self.editing_count: int = self.send_count
+        self.editing_notify_channel: str = self.notify_channel
+        self.editing_feishu_webhook_url: str = self.feishu_webhook_url
         self.execution_task = None
         
         # RPA 实例（延迟初始化，避免启动时连接浏览器）
@@ -354,6 +385,42 @@ class TemplateManagerApp(App):
                     yield Button(
                         "取消",
                         id="btn-cancel-count",
+                        variant="default",
+                        classes="hidden",
+                    )
+
+                yield Static("通知渠道", id="notify-channel-label")
+                yield Static(self._channel_to_text(self.notify_channel), id="notify-channel-display")
+                yield Button(
+                    "切换",
+                    id="btn-cycle-channel",
+                    variant="default",
+                    classes="hidden",
+                )
+
+                yield Static("飞书 Webhook", id="feishu-webhook-label")
+                yield Static(
+                    self.feishu_webhook_url if self.feishu_webhook_url else "(未配置)",
+                    id="feishu-webhook-display",
+                )
+                yield Input(
+                    self.feishu_webhook_url,
+                    id="feishu-webhook-input",
+                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/...",
+                    classes="hidden",
+                )
+
+                with Vertical(id="notify-action-column"):
+                    yield Button("修改", id="btn-edit-notify", variant="default")
+                    yield Button(
+                        "保存",
+                        id="btn-save-notify",
+                        variant="success",
+                        classes="hidden",
+                    )
+                    yield Button(
+                        "取消",
+                        id="btn-cancel-notify",
                         variant="default",
                         classes="hidden",
                     )
@@ -473,6 +540,14 @@ class TemplateManagerApp(App):
             self._save_count_edit()
         elif button_id == "btn-cancel-count":
             self._cancel_count_edit()
+        elif button_id == "btn-edit-notify":
+            self._start_notify_edit()
+        elif button_id == "btn-save-notify":
+            self._save_notify_edit()
+        elif button_id == "btn-cancel-notify":
+            self._cancel_notify_edit()
+        elif button_id == "btn-cycle-channel":
+            self._cycle_notify_channel()
         elif button_id == "btn-connect":
             self.action_connect_browser()
         elif button_id == "btn-execute":
@@ -629,7 +704,10 @@ class TemplateManagerApp(App):
     def _connect_browser(self) -> None:
         """后台连接浏览器"""
         try:
-            self._rpa = AwinRPA()
+            self._rpa = AwinRPA(
+                notify_channel=self.notify_channel,
+                feishu_webhook_url=self.feishu_webhook_url,
+            )
             self.call_from_thread(self._on_browser_connected)
         except Exception as e:
             logger.error(f"连接浏览器失败: {e}")
@@ -850,6 +928,102 @@ class TemplateManagerApp(App):
         self.query_one("#btn-edit-count").remove_class("hidden")
         self.query_one("#btn-save-count").add_class("hidden")
         self.query_one("#btn-cancel-count").add_class("hidden")
+
+    # ===== 通知配置操作 =====
+
+    @staticmethod
+    def _channel_to_text(channel: str) -> str:
+        mapping = {
+            "desktop": "仅本地通知",
+            "feishu": "仅飞书通知",
+            "both": "本地 + 飞书",
+            "none": "不通知",
+        }
+        return mapping.get(channel, "仅本地通知")
+
+    def _cycle_notify_channel(self) -> None:
+        """循环切换通知渠道（仅在编辑状态可用）"""
+        if not self.is_notify_editing:
+            return
+        order = ["desktop", "feishu", "both", "none"]
+        try:
+            idx = order.index(self.editing_notify_channel)
+        except ValueError:
+            idx = 0
+        self.editing_notify_channel = order[(idx + 1) % len(order)]
+        self.query_one("#notify-channel-display", Static).update(
+            self._channel_to_text(self.editing_notify_channel)
+        )
+
+    def _start_notify_edit(self) -> None:
+        """开始编辑通知配置"""
+        self.is_notify_editing = True
+        self.editing_notify_channel = self.notify_channel
+        self.editing_feishu_webhook_url = self.feishu_webhook_url
+
+        self.query_one("#btn-edit-notify").add_class("hidden")
+        self.query_one("#btn-save-notify").remove_class("hidden")
+        self.query_one("#btn-cancel-notify").remove_class("hidden")
+        self.query_one("#btn-cycle-channel").remove_class("hidden")
+        self.query_one("#feishu-webhook-display").add_class("hidden")
+
+        webhook_input = self.query_one("#feishu-webhook-input", Input)
+        webhook_input.remove_class("hidden")
+        webhook_input.value = self.feishu_webhook_url
+        webhook_input.focus()
+
+    def _save_notify_edit(self) -> None:
+        """保存通知配置"""
+        if not self.is_notify_editing:
+            return
+
+        webhook_input = self.query_one("#feishu-webhook-input", Input)
+        webhook_url = webhook_input.value.strip()
+
+        self.notify_channel = self.editing_notify_channel
+        self.feishu_webhook_url = webhook_url
+        self.config_manager.notify_channel = self.notify_channel
+        self.config_manager.feishu_webhook_url = self.feishu_webhook_url
+
+        self.query_one("#notify-channel-display", Static).update(
+            self._channel_to_text(self.notify_channel)
+        )
+        self.query_one("#feishu-webhook-display", Static).update(
+            self.feishu_webhook_url if self.feishu_webhook_url else "(未配置)"
+        )
+
+        self.query_one("#btn-edit-notify").remove_class("hidden")
+        self.query_one("#btn-save-notify").add_class("hidden")
+        self.query_one("#btn-cancel-notify").add_class("hidden")
+        self.query_one("#btn-cycle-channel").add_class("hidden")
+        self.query_one("#feishu-webhook-display").remove_class("hidden")
+        self.query_one("#feishu-webhook-input").add_class("hidden")
+        self.is_notify_editing = False
+
+        self._add_log(
+            "success",
+            f"通知配置已保存：{self._channel_to_text(self.notify_channel)}",
+        )
+
+    def _cancel_notify_edit(self) -> None:
+        """取消编辑通知配置"""
+        if not self.is_notify_editing:
+            return
+
+        self.query_one("#notify-channel-display", Static).update(
+            self._channel_to_text(self.notify_channel)
+        )
+        self.query_one("#feishu-webhook-display", Static).update(
+            self.feishu_webhook_url if self.feishu_webhook_url else "(未配置)"
+        )
+
+        self.query_one("#btn-edit-notify").remove_class("hidden")
+        self.query_one("#btn-save-notify").add_class("hidden")
+        self.query_one("#btn-cancel-notify").add_class("hidden")
+        self.query_one("#btn-cycle-channel").add_class("hidden")
+        self.query_one("#feishu-webhook-display").remove_class("hidden")
+        self.query_one("#feishu-webhook-input").add_class("hidden")
+        self.is_notify_editing = False
 
     # ===== 执行操作 =====
 

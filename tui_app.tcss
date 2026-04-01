@@ -104,7 +104,7 @@
 
 #send-count-section {
     height: 10%;
-    min-height: 3;
+    min-height: 5;
     align: left middle;
     padding: 0 0;
     border-top: solid $surface-lighten-2;
@@ -140,9 +140,64 @@
 #count-action-column {
     width: 12;
     height: auto;
+    margin-right: 2;
 }
 
 #count-action-column Button {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+#notify-channel-label {
+    width: auto;
+    margin-right: 1;
+    color: $text;
+}
+
+#notify-channel-display {
+    width: 16;
+    min-width: 14;
+    padding: 0 1;
+    background: $surface;
+    border: solid $primary;
+    text-align: center;
+}
+
+#btn-cycle-channel {
+    width: 8;
+    min-width: 8;
+    margin-left: 1;
+    margin-right: 2;
+}
+
+#feishu-webhook-label {
+    width: auto;
+    margin-right: 1;
+    color: $text;
+}
+
+#feishu-webhook-display {
+    width: 1fr;
+    min-width: 24;
+    padding: 0 1;
+    background: $surface;
+    border: solid $primary;
+    text-align: left;
+}
+
+#feishu-webhook-input {
+    width: 1fr;
+    min-width: 24;
+    margin-right: 1;
+}
+
+#notify-action-column {
+    width: 12;
+    height: auto;
+    margin-left: 2;
+}
+
+#notify-action-column Button {
     width: 100%;
     margin-bottom: 0;
 }

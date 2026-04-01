@@ -45,6 +45,7 @@ except Exception:
 from rich.console import Console
 from rich.panel import Panel
 import json
+import os
 from pathlib import Path
 import pyperclip
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ AUDIT_LOG_PATH = Path(__file__).parent / "awin_audit.jsonl"
 SEEN_IDS_PATH = Path(__file__).parent / "seen_publisher_ids.txt"
 CLICKED_IDS_PATH = Path(__file__).parent / "clicked_publisher_ids.txt"
 HTML_DUMP_DIR = Path(__file__).parent / "html_dumps"
+FEISHU_WEBHOOK_PATH = Path(__file__).parent / "feishu_webhook.txt"
 
 
 def _audit_filter(record) -> bool:
@@ -500,14 +502,40 @@ class AwinRPA:
     # 默认目标页面 URL
     DEFAULT_URL = 'https://ui.awin.com/awin/merchant/45307/affiliate-directory/index/tab/notInvited'
     
-    def __init__(self):
+    def __init__(self, notify_channel: str = "desktop", feishu_webhook_url: str | None = None):
         self.browser = Chromium()
         self.tab = self._select_awin_tab()
         self.message_manager = MessageManager()
+        self.notify_channel = self._normalize_notify_channel(notify_channel)
+        self.feishu_webhook_url = (feishu_webhook_url or "").strip() or self._load_feishu_webhook_url()
         self._fetch_seq = 0
         self._click_seq = 0
         self._seen_publisher_ids: set[str] = _load_id_set(SEEN_IDS_PATH)
         self._clicked_publisher_ids: set[str] = _load_id_set(CLICKED_IDS_PATH)
+
+    @staticmethod
+    def _normalize_notify_channel(channel: str) -> str:
+        allowed = {"desktop", "feishu", "both", "none"}
+        normalized = (channel or "").strip().lower()
+        if normalized in allowed:
+            return normalized
+        return "desktop"
+
+    def _load_feishu_webhook_url(self) -> str | None:
+        """
+        优先从环境变量读取飞书机器人 webhook；
+        若未设置，则尝试从 feishu_webhook.txt 读取。
+        """
+        env_value = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
+        if env_value:
+            return env_value
+        try:
+            if FEISHU_WEBHOOK_PATH.exists():
+                value = FEISHU_WEBHOOK_PATH.read_text(encoding="utf-8").strip()
+                return value or None
+        except Exception as e:
+            logger.warning(f"读取飞书 webhook 配置失败: {e}")
+        return None
     
     def _page_context(self) -> dict:
         try:
@@ -534,6 +562,51 @@ class AwinRPA:
                 logger.info(f"[通知]{title}: {message}")
             except Exception:
                 pass
+
+    def _notify_feishu_invite_failure(self, publisher_id: str, reason: str):
+        """
+        邀请失败时向飞书群机器人发送 webhook 通知。
+        webhook 来源：
+        1) 环境变量 FEISHU_WEBHOOK_URL
+        2) 程序目录下 feishu_webhook.txt
+        """
+        if self.notify_channel in ("desktop", "both"):
+            self._notify("邀请失败", f"{reason}：publisher {publisher_id}")
+
+        if self.notify_channel not in ("feishu", "both"):
+            return
+
+        webhook_url = self.feishu_webhook_url
+        if not webhook_url:
+            logger.warning("飞书通知已启用，但未配置 webhook_url（可在 UI 中设置）")
+            return
+
+        try:
+            current_url = self._page_context().get("url") or "-"
+            payload = {
+                "msg_type": "text",
+                "content": {
+                    "text": (
+                        "Awin RPA 邀请失败告警\n"
+                        f"Publisher: {publisher_id}\n"
+                        f"原因: {reason}\n"
+                        f"页面: {current_url}\n"
+                        f"时间(UTC): {datetime.now(timezone.utc).isoformat()}"
+                    )
+                },
+            }
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url,
+                data=data,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                if getattr(resp, "status", 200) >= 300:
+                    logger.warning(f"飞书通知发送失败，HTTP 状态码: {resp.status}")
+        except Exception as e:
+            logger.warning(f"飞书通知发送异常: {e}")
 
     def _safe_get_html(self) -> str:
         try:
@@ -703,7 +776,7 @@ class AwinRPA:
                     publisher_id=publisher_id,
                     after_refresh=True,
                 )
-                self._notify("邀请失败", f"未找到按钮：publisher {publisher_id}")
+                self._notify_feishu_invite_failure(publisher_id, "未找到按钮")
                 return False
         
         logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
@@ -726,7 +799,7 @@ class AwinRPA:
                 },
                 html_path=html_fail,
             )
-            self._notify("邀请失败", f"点击失败：publisher {publisher_id}")
+            self._notify_feishu_invite_failure(publisher_id, "点击失败")
             return False
 
         # 输入邀请信息（等待弹窗/输入框真正出现，避免"按钮已失效但元素仍在"的情况）
@@ -743,7 +816,7 @@ class AwinRPA:
                     error="customMessage_not_found",
                     html_path=html_fail,
                 )
-                self._notify("邀请失败", f"未找到输入框：publisher {publisher_id}")
+                self._notify_feishu_invite_failure(publisher_id, "未找到输入框")
                 return False
             custom_message.input(msg)
         except Exception as e:
@@ -754,7 +827,7 @@ class AwinRPA:
                 stage="input_message",
                 error=str(e),
             )
-            self._notify("邀请失败", f"填写信息失败：publisher {publisher_id}")
+            self._notify_feishu_invite_failure(publisher_id, "填写信息失败")
             return False
 
         # 等待 send invite 按钮可点击，然后点击
@@ -768,7 +841,7 @@ class AwinRPA:
                     stage="wait_send_button",
                     error="send_button_not_found",
                 )
-                self._notify("邀请失败", f"未找到发送按钮：publisher {publisher_id}")
+                self._notify_feishu_invite_failure(publisher_id, "未找到发送按钮")
                 return False
             send_btn.wait.clickable(timeout=10)
             send_btn.click()
@@ -780,7 +853,7 @@ class AwinRPA:
                 stage="click_send_button",
                 error=str(e),
             )
-            self._notify("邀请失败", f"点击发送失败：publisher {publisher_id}")
+            self._notify_feishu_invite_failure(publisher_id, "点击发送失败")
             return False
 
         # 等待弹窗出现并关闭
@@ -794,7 +867,7 @@ class AwinRPA:
                     stage="wait_popup_ok",
                     error="popup_ok_not_found",
                 )
-                self._notify("邀请失败", f"未出现确认弹窗：publisher {publisher_id}")
+                self._notify_feishu_invite_failure(publisher_id, "未出现确认弹窗")
                 return False
             popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
             popup_ok_btn.click()
@@ -806,7 +879,7 @@ class AwinRPA:
                 stage="close_popup_ok",
                 error=str(e),
             )
-            self._notify("邀请失败", f"关闭弹窗失败：publisher {publisher_id}")
+            self._notify_feishu_invite_failure(publisher_id, "关闭弹窗失败")
             return False
 
         # 保存成功发送后的快照
