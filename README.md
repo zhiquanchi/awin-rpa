@@ -17,19 +17,26 @@
 
 1. 点击“通知配置”区域的 `修改`
 2. 点击 `切换` 按钮选择通知渠道
-3. 在“飞书 Webhook”输入框中直接输入 `webhook_url`
+3. 如果选择 `仅飞书通知` 或 `本地 + 飞书`，必须在“飞书 Webhook”输入框中填写 `webhook_url`
 4. 点击 `保存`
 
 说明：
 
-- 选择 `仅飞书通知` 或 `本地 + 飞书` 时，建议配置 `webhook_url`
-- 未配置 webhook 时，飞书消息会跳过并在日志中给出提示
+- 选择 `仅飞书通知` 或 `本地 + 飞书` 时，必须配置 `webhook_url`
+
+## 终端设置模式中配置飞书通知
+
+运行 `main.py` 后，可在 `⚙️ 设置模式 (管理邀请信息与通知)` 中进入 `🔔 飞书通知设置`：
+
+1. 选择是否开启飞书通知
+2. 开启时输入飞书机器人 `webhook_url`
+3. 保存后会写入同一份 `tui_config.json`
 
 ## 飞书 Webhook 配置优先级
 
 飞书 webhook 的读取顺序如下：
 
-1. UI 配置（`tui_config.json` 中的 `feishu_webhook_url`，连接浏览器时传入）
+1. UI 配置（`tui_config.json` 中的 `feishu_webhook_url`，终端模式与 TUI 共用）
 2. 环境变量 `FEISHU_WEBHOOK_URL`
 3. 项目根目录 `feishu_webhook.txt`（文件内容为 webhook URL）
 

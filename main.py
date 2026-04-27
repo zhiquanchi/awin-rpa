@@ -55,6 +55,7 @@ import urllib.request
 import urllib.error
 from dulwich import porcelain
 from dulwich.repo import Repo
+from config_manager import ConfigManager
 
 console = Console()
 logger.add("file.log")
@@ -107,7 +108,7 @@ logger.add(
 class VersionManager:
     """版本管理器 - 使用 Dulwich 进行 Git 操作"""
     
-    def __init__(self, repo_path: Path = None):
+    def __init__(self, repo_path: Path | None = None):
         self.repo_path = repo_path or Path(__file__).parent
         self.pyproject_path = self.repo_path / "pyproject.toml"
     
@@ -233,10 +234,10 @@ class Updater:
     GITHUB_REPO = "zhiquanchi/awin-rpa"
     GITHUB_BRANCH = "master"
     RAW_BASE_URL = "https://raw.githubusercontent.com"
-    UPDATE_FILES = ["main.py", "tui_app.py", "tui_app.tcss", "pyproject.toml"]
+    UPDATE_FILES = ["main.py", "tui_app.py", "tui_app.tcss", "config_manager.py", "pyproject.toml"]
     TIMEOUT = 15  # 网络请求超时（秒）
 
-    def __init__(self, base_dir: Path = None):
+    def __init__(self, base_dir: Path | None = None):
         self.base_dir = base_dir or Path(__file__).parent
         self.version_manager = VersionManager(self.base_dir)
 
@@ -342,7 +343,7 @@ class Updater:
 class MessageManager:
     """邀请信息管理器"""
     
-    def __init__(self, file_path: Path = None):
+    def __init__(self, file_path: Path | None = None):
         self.file_path = file_path or Path(__file__).parent / "invitation_messages.json"
     
     def load(self) -> list[dict]:
@@ -502,12 +503,20 @@ class AwinRPA:
     # 默认目标页面 URL
     DEFAULT_URL = 'https://ui.awin.com/awin/merchant/45307/affiliate-directory/index/tab/notInvited'
     
-    def __init__(self, notify_channel: str = "desktop", feishu_webhook_url: str | None = None):
+    def __init__(self, notify_channel: str | None = None, feishu_webhook_url: str | None = None):
         self.browser = Chromium()
         self.tab = self._select_awin_tab()
         self.message_manager = MessageManager()
-        self.notify_channel = self._normalize_notify_channel(notify_channel)
-        self.feishu_webhook_url = (feishu_webhook_url or "").strip() or self._load_feishu_webhook_url()
+        self.config_manager = ConfigManager()
+        self.current_template_name = ""
+        self.notify_channel = self._normalize_notify_channel(
+            notify_channel if notify_channel is not None else self.config_manager.notify_channel
+        )
+        self.feishu_webhook_url = (
+            (feishu_webhook_url or "").strip()
+            or self.config_manager.feishu_webhook_url
+            or self._load_feishu_webhook_url()
+        )
         self._fetch_seq = 0
         self._click_seq = 0
         self._seen_publisher_ids: set[str] = _load_id_set(SEEN_IDS_PATH)
@@ -563,6 +572,9 @@ class AwinRPA:
             except Exception:
                 pass
 
+    def _template_display_name(self) -> str:
+        return self.current_template_name or "(未指定模板)"
+
     def _notify_feishu_invite_failure(self, publisher_id: str, reason: str):
         """
         邀请失败时向飞书群机器人发送 webhook 通知。
@@ -570,8 +582,9 @@ class AwinRPA:
         1) 环境变量 FEISHU_WEBHOOK_URL
         2) 程序目录下 feishu_webhook.txt
         """
+        template_name = self._template_display_name()
         if self.notify_channel in ("desktop", "both"):
-            self._notify("邀请失败", f"{reason}：publisher {publisher_id}")
+            self._notify("邀请失败", f"模板：{template_name}\n{reason}：publisher {publisher_id}")
 
         if self.notify_channel not in ("feishu", "both"):
             return
@@ -588,6 +601,7 @@ class AwinRPA:
                 "content": {
                     "text": (
                         "Awin RPA 邀请失败告警\n"
+                        f"模板: {template_name}\n"
                         f"Publisher: {publisher_id}\n"
                         f"原因: {reason}\n"
                         f"页面: {current_url}\n"
@@ -682,7 +696,7 @@ class AwinRPA:
         """重新获取当前浏览器标签页（不刷新页面）"""
         self.tab = self._select_awin_tab()
     
-    def goto_page(self, url: str = None):
+    def goto_page(self, url: str | None = None):
         """跳转到邀请页面"""
         target_url = url or self.DEFAULT_URL
         self.tab.get(target_url)
@@ -729,6 +743,82 @@ class AwinRPA:
         self.tab.wait(2, 4)
         after_url = self._page_context().get("url")
         self._audit("next_page_clicked", before_url=before_url, after_url=after_url)
+
+    def _close_invite_result_popup(self, publisher_id: str) -> bool:
+        """
+        关闭发送邀请后的结果弹窗。
+        兼容不同 DOM 结构，避免仅依赖单一 #popup_ok 导致卡住。
+        """
+        selectors = [
+            "#popup_ok",
+            "css:button#popup_ok",
+            "css:button.btn-small-green.modal_save",
+            "xpath=//button[@id='popup_ok']",
+            "xpath=//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),'ok')]",
+            "xpath=//button[contains(normalize-space(.), '确定')]",
+            "xpath=//a[@id='popup_ok']",
+        ]
+
+        for sel in selectors:
+            try:
+                btn = self.tab.ele(sel, timeout=1)
+                if not btn:
+                    continue
+                try:
+                    btn.wait.displayed(timeout=2, raise_err=False)
+                except Exception:
+                    pass
+                btn.click()
+                self._audit(
+                    "invite_popup_closed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    close_selector=sel,
+                )
+                return True
+            except Exception:
+                continue
+
+        # JS 兜底：在常见弹窗容器中寻找「确定/OK」按钮并点击
+        try:
+            clicked = self.tab.run_js(
+                """
+                const okWords = ['ok', 'confirm', 'yes', '确定', '确认'];
+                const candidates = Array.from(document.querySelectorAll(
+                    'button, a, [role="button"], input[type="button"], input[type="submit"]'
+                ));
+                for (const el of candidates) {
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                    const text = ((el.innerText || el.value || '').trim()).toLowerCase();
+                    if (!text) continue;
+                    if (okWords.some(w => text.includes(w))) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+                """
+            )
+            if bool(clicked):
+                self._audit(
+                    "invite_popup_closed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    close_selector="js_fallback",
+                )
+                return True
+        except Exception:
+            pass
+
+        self._audit(
+            "invite_click_failed",
+            click_seq=self._click_seq,
+            publisher_id=publisher_id,
+            stage="close_popup_ok",
+            error="popup_close_not_found",
+        )
+        return False
     
     def send_invite_to_publisher(self, publisher_id: str, msg: str) -> bool:
         """
@@ -856,21 +946,14 @@ class AwinRPA:
             self._notify_feishu_invite_failure(publisher_id, "点击发送失败")
             return False
 
-        # 等待弹窗出现并关闭
+        # 关闭结果弹窗（兼容多种弹窗结构，避免卡住）
         try:
-            popup_ok_btn = self.tab.ele("#popup_ok", timeout=12)
-            if not popup_ok_btn:
-                self._audit(
-                    "invite_click_failed",
-                    click_seq=self._click_seq,
-                    publisher_id=publisher_id,
-                    stage="wait_popup_ok",
-                    error="popup_ok_not_found",
-                )
-                self._notify_feishu_invite_failure(publisher_id, "未出现确认弹窗")
+            # 给弹窗一点渲染时间，再尝试关闭。
+            self.tab.wait(0.3, 0.6)
+            closed = self._close_invite_result_popup(publisher_id)
+            if not closed:
+                self._notify_feishu_invite_failure(publisher_id, "关闭结果弹窗失败")
                 return False
-            popup_ok_btn.wait.displayed(timeout=10, raise_err=True)
-            popup_ok_btn.click()
         except Exception as e:
             self._audit(
                 "invite_click_failed",
@@ -908,12 +991,13 @@ class AwinRPA:
         logger.info(f"已重置已点击记录，共清除 {count} 条")
         return count
 
-    def run(self, invite_count: int, msg: str):
+    def run(self, invite_count: int, msg: str, template_name: str = ""):
         """
         执行 RPA 主流程
         invite_count: 需要发送的邀请数量
         msg: 申请信息内容
         """
+        self.current_template_name = template_name.strip()
         sent_count = 0  # 已发送的邀请数量
 
         while sent_count < invite_count:
@@ -954,7 +1038,7 @@ class AwinRPA:
                 self.click_next_page()
 
         console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
-        self._notify("任务完成", f"已成功发送 {sent_count} 条邀请")
+        self._notify("任务完成", f"模板：{self._template_display_name()}\n已成功发送 {sent_count} 条邀请")
 
 
 class AppUI:
@@ -963,8 +1047,81 @@ class AppUI:
     def __init__(self, rpa: AwinRPA):
         self.rpa = rpa
         self.message_manager = rpa.message_manager
+        self.config_manager = ConfigManager()
         self.version_manager = VersionManager()
         self.updater = Updater()
+
+    def _sync_rpa_notification_config(self):
+        """将共享配置同步到当前 RPA 实例"""
+        self.rpa.notify_channel = self.config_manager.notify_channel
+        self.rpa.feishu_webhook_url = self.config_manager.feishu_webhook_url
+
+    def _configure_feishu_notifications(self):
+        """配置飞书通知开关与 Webhook"""
+        while True:
+            enabled_text = "[green]已开启[/green]" if self.config_manager.feishu_enabled else "[yellow]已关闭[/yellow]"
+            webhook_text = self.config_manager.feishu_webhook_url or "(未配置)"
+            console.print(Panel.fit(
+                "[bold cyan]🔔 飞书通知设置[/bold cyan]",
+                border_style="cyan"
+            ))
+            console.print(f"当前状态: {enabled_text}")
+            console.print(f"Webhook URL: [dim]{webhook_text}[/dim]\n")
+
+            action = questionary.select(
+                "请选择操作:",
+                choices=[
+                    "✅ 开启飞书通知" if not self.config_manager.feishu_enabled else "❌ 关闭飞书通知",
+                    "✏️ 设置 Webhook URL",
+                    "🔙 返回设置"
+                ]
+            ).ask()
+
+            if action is None or "返回" in action:
+                return
+
+            if "开启" in action:
+                webhook_url = questionary.text(
+                    "请输入飞书机器人 Webhook URL:",
+                    default=self.config_manager.feishu_webhook_url,
+                    validate=lambda x: (
+                        True
+                        if x.strip().startswith(("http://", "https://"))
+                        else "请输入有效的 Webhook URL"
+                    ),
+                ).ask()
+                if webhook_url is None:
+                    console.print("[yellow]已取消开启飞书通知[/yellow]\n")
+                    continue
+
+                self.config_manager.feishu_webhook_url = webhook_url.strip()
+                self.config_manager.set_feishu_enabled(True)
+                self._sync_rpa_notification_config()
+                console.print("[green]✅ 已开启飞书通知[/green]\n")
+                return
+
+            if "关闭" in action:
+                self.config_manager.set_feishu_enabled(False)
+                self._sync_rpa_notification_config()
+                console.print("[green]✅ 已关闭飞书通知[/green]\n")
+                return
+
+            webhook_url = questionary.text(
+                "请输入飞书机器人 Webhook URL:",
+                default=self.config_manager.feishu_webhook_url,
+                validate=lambda x: (
+                    True
+                    if x.strip().startswith(("http://", "https://"))
+                    else "请输入有效的 Webhook URL"
+                ),
+            ).ask()
+            if webhook_url is None:
+                console.print("[yellow]已取消修改 Webhook URL[/yellow]\n")
+                continue
+
+            self.config_manager.feishu_webhook_url = webhook_url.strip()
+            self._sync_rpa_notification_config()
+            console.print("[green]✅ Webhook URL 已保存[/green]\n")
     
     def reset_clicked_mode(self):
         """重置已点击记录"""
@@ -1163,15 +1320,16 @@ class AppUI:
             console.print("[green]✅ 工作目录干净[/green]\n")
     
     def settings_mode(self):
-        """设置模式 - 管理邀请信息"""
+        """设置模式 - 管理邀请信息与通知"""
         console.print(Panel.fit(
-            "[bold yellow]⚙️ 设置模式 - 管理邀请信息[/bold yellow]",
+            "[bold yellow]⚙️ 设置模式 - 管理邀请信息与通知[/bold yellow]",
             border_style="yellow"
         ))
         
         messages = self.message_manager.load()
         
         while True:
+            feishu_status = "已开启" if self.config_manager.feishu_enabled else "已关闭"
             self.message_manager.display(messages)
             
             action = questionary.select(
@@ -1180,6 +1338,7 @@ class AppUI:
                     "➕ 新增邀请信息",
                     "✏️ 编辑邀请信息",
                     "🗑️ 删除邀请信息",
+                    f"🔔 飞书通知设置 ({feishu_status})",
                     "🔙 返回主菜单"
                 ]
             ).ask()
@@ -1192,8 +1351,10 @@ class AppUI:
                 messages = self.message_manager.edit(messages)
             elif "删除" in action:
                 messages = self.message_manager.delete(messages)
+            elif "飞书通知" in action:
+                self._configure_feishu_notifications()
     
-    def select_message(self) -> str:
+    def select_message(self) -> tuple[str, str]:
         """选择或修改邀请信息"""
         messages = self.message_manager.load()
         
@@ -1242,7 +1403,7 @@ class AppUI:
             
             if new_content is None:
                 console.print("[yellow]已取消修改[/yellow]")
-                return selected_msg["content"]
+                return selected_msg["name"], selected_msg["content"]
             
             save_option = questionary.select(
                 "是否保存这次修改?",
@@ -1266,12 +1427,13 @@ class AppUI:
                     messages.append({"name": new_name, "content": new_content})
                     self.message_manager.save(messages)
                     console.print(f"[green]✅ 已保存新邀请信息: {new_name}[/green]")
+                    return new_name, new_content
             
-            return new_content
+            return selected_msg["name"], new_content
         
-        return selected_msg["content"]
+        return selected_msg["name"], selected_msg["content"]
     
-    def get_user_input(self) -> tuple[int, str]:
+    def get_user_input(self) -> tuple[int, str, str]:
         """使用终端UI交互获取用户输入的参数"""
         console.print(Panel.fit(
             "[bold cyan]🤖 Awin RPA 自动化工具[/bold cyan]\n"
@@ -1283,7 +1445,7 @@ class AppUI:
             "请选择操作:",
             choices=[
                 "🚀 开始执行 RPA",
-                "⚙️ 设置模式 (管理邀请信息)",
+                "⚙️ 设置模式 (管理邀请信息与通知)",
                 "🔄 重置已点击记录",
                 "🔍 检查更新",
                 "📦 版本管理",
@@ -1321,10 +1483,11 @@ class AppUI:
             console.print("[yellow]已取消操作[/yellow]")
             exit(0)
         
-        msg = self.select_message()
+        template_name, msg = self.select_message()
         
         console.print("\n[bold]📋 执行配置:[/bold]")
         console.print(f"  • 发送数量: [green]{invite_count}[/green]")
+        console.print(f"  • 模板名称: [cyan]{template_name}[/cyan]")
         console.print(f"  • 消息内容: [dim]{msg[:50]}...[/dim]" if len(msg) > 50 else f"  • 消息内容: [dim]{msg}[/dim]")
         
         confirm = questionary.confirm(
@@ -1336,18 +1499,18 @@ class AppUI:
             console.print("[yellow]已取消操作[/yellow]")
             exit(0)
         
-        return int(invite_count), msg
+        return int(invite_count), template_name, msg
     
     def start(self):
         """启动应用程序"""
-        invite_count, msg = self.get_user_input()
+        invite_count, template_name, msg = self.get_user_input()
         
         console.print("\n[bold green]🚀 开始执行 RPA...[/bold green]")
         try:
-            self.rpa.run(invite_count=invite_count, msg=msg)
+            self.rpa.run(invite_count=invite_count, msg=msg, template_name=template_name)
         except Exception as e:
             try:
-                self.rpa._notify("任务失败", f"执行异常：{e}")
+                self.rpa._notify("任务失败", f"模板：{self.rpa._template_display_name()}\n执行异常：{e}")
             except Exception:
                 pass
             raise
@@ -1358,4 +1521,3 @@ if __name__ == "__main__":
     rpa = AwinRPA()
     app = AppUI(rpa)
     app.start()
-
