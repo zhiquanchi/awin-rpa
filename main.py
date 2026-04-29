@@ -947,24 +947,159 @@ class AwinRPA:
             time.sleep(0.3)
         return ""
 
-    def _dismiss_invite_form(self) -> None:
+    def _get_invite_modal_state(self) -> dict[str, object]:
+        """读取结果弹窗与邀请表单的可见状态。"""
+        fallback = {
+            "popup_border_exists": False,
+            "popup_border_visible": False,
+            "membership_modal_exists": False,
+            "membership_modal_visible": False,
+            "membership_modal_text": "",
+            "popup_ok_exists": False,
+            "popup_ok_visible": False,
+            "popup_message_exists": False,
+            "popup_message_visible": False,
+            "popup_message_text": "",
+        }
+        try:
+            state = self.tab.run_js(
+                """
+                const describe = (selector) => {
+                    const el = document.querySelector(selector);
+                    if (!el) {
+                        return { exists: false, visible: false, text: '' };
+                    }
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    const visible =
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        parseFloat(style.opacity || '1') !== 0 &&
+                        rect.width > 0 &&
+                        rect.height > 0;
+                    return {
+                        exists: true,
+                        visible,
+                        text: (el.innerText || el.textContent || '')
+                            .replace(/\\s+/g, ' ')
+                            .trim()
+                            .slice(0, 500),
+                    };
+                };
+
+                const popupBorder = describe('#popup_border');
+                const membershipModal = describe('#membershipModal');
+                const popupOk = describe('#popup_ok');
+                const popupMessage = describe('#popup_message');
+
+                return {
+                    popup_border_exists: popupBorder.exists,
+                    popup_border_visible: popupBorder.visible,
+                    membership_modal_exists: membershipModal.exists,
+                    membership_modal_visible: membershipModal.visible,
+                    membership_modal_text: membershipModal.text,
+                    popup_ok_exists: popupOk.exists,
+                    popup_ok_visible: popupOk.visible,
+                    popup_message_exists: popupMessage.exists,
+                    popup_message_visible: popupMessage.visible,
+                    popup_message_text: popupMessage.text,
+                };
+                """
+            )
+            if isinstance(state, dict):
+                return {**fallback, **state}
+        except Exception:
+            pass
+        return fallback
+
+    def _wait_for_popup_border_state(
+        self, visible: bool, timeout: float = 8.0, poll_interval: float = 0.2
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self._get_invite_modal_state()
+            if bool(state.get("popup_border_visible")) is visible:
+                return True
+            time.sleep(poll_interval)
+        state = self._get_invite_modal_state()
+        return bool(state.get("popup_border_visible")) is visible
+
+    def _wait_for_membership_modal_hidden(
+        self, timeout: float = 5.0, poll_interval: float = 0.2
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self._get_invite_modal_state()
+            if not bool(state.get("membership_modal_visible")):
+                return True
+            time.sleep(poll_interval)
+        state = self._get_invite_modal_state()
+        return not bool(state.get("membership_modal_visible"))
+
+    def _dismiss_invite_form(self) -> bool:
         """如果邀请表单 modal 仍然打开，点击 Cancel 将其关闭。
 
         Awin 在 error（如"already exists"）时不自动关闭表单，
         需手动关闭，避免后续 publisher 的 invite_link.click() 受到干扰。
         """
+        selectors = [
+            "css:#membershipModal button.modal_cancel",
+            "xpath=//*[@id='membershipModal']//button[contains(@class, 'modal_cancel')]",
+            "css:button.modal_cancel",
+        ]
+        for sel in selectors:
+            try:
+                cancel = self.tab.ele(sel, timeout=1)
+                if cancel:
+                    cancel.click()
+                    return True
+            except Exception:
+                continue
         try:
-            cancel = self.tab.ele("css:button.modal_cancel", timeout=1)
-            if cancel:
-                cancel.click()
-                return
+            clicked = self.tab.run_js(
+                """
+                const modal = document.querySelector('#membershipModal');
+                if (!modal) return false;
+                const cancel = modal.querySelector('button.modal_cancel');
+                if (!cancel) return false;
+                const style = window.getComputedStyle(modal);
+                const rect = modal.getBoundingClientRect();
+                if (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    parseFloat(style.opacity || '1') === 0 ||
+                    rect.width === 0 ||
+                    rect.height === 0
+                ) {
+                    return false;
+                }
+                cancel.click();
+                return true;
+                """
+            )
+            if bool(clicked):
+                return True
         except Exception:
             pass
         # 兜底：Escape 键
         try:
             self.tab.key_up("Escape")
+            return True
         except Exception:
             pass
+        return False
+
+    def _dismiss_invite_form_until_closed(
+        self, timeout: float = 5.0, poll_interval: float = 0.3
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self._get_invite_modal_state()
+            if not bool(state.get("membership_modal_visible")):
+                return True
+            self._dismiss_invite_form()
+            time.sleep(poll_interval)
+        return self._wait_for_membership_modal_hidden(timeout=0.8, poll_interval=0.2)
 
     def _close_invite_result_popup(self, publisher_id: str) -> bool:
         """
@@ -974,9 +1109,9 @@ class AwinRPA:
         selectors = [
             "#popup_ok",
             "css:button#popup_ok",
-            "css:button.btn-small-green.modal_save",
+            "#popup_border",
+            "css:div#popup_border",
             "xpath=//button[@id='popup_ok']",
-            # "xpath=//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),'ok')]",
             "xpath=//button[contains(normalize-space(.), '确定')]",
             "xpath=//a[@id='popup_ok']",
         ]
@@ -991,13 +1126,16 @@ class AwinRPA:
                 except Exception:
                     pass
                 btn.click()
-                self._audit(
-                    "invite_popup_closed",
-                    click_seq=self._click_seq,
-                    publisher_id=publisher_id,
-                    close_selector=sel,
-                )
-                return True
+                if self._wait_for_popup_border_state(
+                    visible=False, timeout=2.0, poll_interval=0.2
+                ):
+                    self._audit(
+                        "invite_popup_closed",
+                        click_seq=self._click_seq,
+                        publisher_id=publisher_id,
+                        close_selector=sel,
+                    )
+                    return True
             except Exception:
                 continue
 
@@ -1016,7 +1154,9 @@ class AwinRPA:
                 return false;
                 """
             )
-            if bool(clicked):
+            if bool(clicked) and self._wait_for_popup_border_state(
+                visible=False, timeout=2.0, poll_interval=0.2
+            ):
                 self._audit(
                     "invite_popup_closed",
                     click_seq=self._click_seq,
@@ -1174,7 +1314,27 @@ class AwinRPA:
         try:
             # 给弹窗一点渲染时间，再尝试关闭。
             self.tab.wait(0.3, 10)
+            popup_border_visible = self._wait_for_popup_border_state(
+                visible=True, timeout=8.0, poll_interval=0.2
+            )
             result_popup_text = self._get_invite_result_popup_text()
+            modal_state_before_close = self._get_invite_modal_state()
+            if not popup_border_visible:
+                html_fail = self._save_snapshot(publisher_id, "popup_border_not_found")
+                self._audit(
+                    "invite_send_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    stage="result_popup",
+                    error="popup_border_not_found",
+                    popup_text=result_popup_text,
+                    modal_state_before_close=modal_state_before_close,
+                    html_path=html_fail,
+                )
+                self._notify_feishu_invite_failure(
+                    publisher_id, "发送后未出现结果弹窗"
+                )
+                return False
             if self.INVITE_ALREADY_EXISTS_TEXT in result_popup_text.lower():
                 html_fail = self._save_snapshot(publisher_id, "invite_already_exists")
                 self._audit(
@@ -1184,13 +1344,19 @@ class AwinRPA:
                     stage="result_popup",
                     error="invitation_already_exists",
                     popup_text=result_popup_text,
+                    modal_state_before_close=modal_state_before_close,
                     html_path=html_fail,
                 )
                 closed = self._close_invite_result_popup(publisher_id)
-                self._dismiss_invite_form()  # error 时表单不自动关，手动关闭
+                dismissed = self._dismiss_invite_form_until_closed()
                 if not closed:
                     self._notify_feishu_invite_failure(
                         publisher_id, "Invitation already exists，且关闭结果弹窗失败"
+                    )
+                    return False
+                if not dismissed:
+                    self._notify_feishu_invite_failure(
+                        publisher_id, "Invitation already exists，且关闭邀请弹窗失败"
                     )
                     return False
                 self._mark_publisher_processed(publisher_id)
@@ -1204,6 +1370,44 @@ class AwinRPA:
             closed = self._close_invite_result_popup(publisher_id)
             if not closed:
                 self._notify_feishu_invite_failure(publisher_id, "关闭结果弹窗失败")
+                return False
+
+            self.tab.wait(0.2, 10)
+            modal_state_after_close = self._get_invite_modal_state()
+            if bool(modal_state_after_close.get("membership_modal_visible")):
+                html_fail = self._save_snapshot(
+                    publisher_id, "membership_modal_still_visible"
+                )
+                self._audit(
+                    "invite_send_failed",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    stage="result_popup",
+                    error="membership_modal_still_visible_after_popup_close",
+                    popup_text=result_popup_text,
+                    modal_state_before_close=modal_state_before_close,
+                    modal_state_after_close=modal_state_after_close,
+                    html_path=html_fail,
+                )
+                dismissed = self._dismiss_invite_form_until_closed()
+                modal_state_after_cancel = self._get_invite_modal_state()
+                self._audit(
+                    "invite_form_cancelled_after_popup_close",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    dismissed=dismissed,
+                    modal_state_after_cancel=modal_state_after_cancel,
+                )
+                if not dismissed:
+                    self._notify_feishu_invite_failure(
+                        publisher_id, "点击 OK 后邀请弹窗残留，且自动取消失败"
+                    )
+                    return False
+                self._mark_publisher_processed(publisher_id)
+                self._notify_feishu_invite_failure(
+                    publisher_id, "点击 OK 后邀请弹窗仍保留，已自动取消并跳过"
+                )
+                self.tab.wait(0.5, 10)
                 return False
         except Exception as e:
             self._audit(
