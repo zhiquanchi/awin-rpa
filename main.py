@@ -3,6 +3,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from typing import Any, cast
 
 import questionary
 from DrissionPage import Chromium, ChromiumOptions
@@ -29,7 +30,7 @@ try:
         # 回退：包装 questionary.text 工厂函数，在调用时为多行输入尝试传递 instruction 参数（如果支持）
         _orig_text = questionary.text
 
-        def _patched_text(*args, **kwargs):
+        def _patched_text(*args: Any, **kwargs: Any) -> Any:
             try:
                 multiline = kwargs.get("multiline", False)
                 if multiline:
@@ -45,7 +46,7 @@ try:
                 kwargs.pop("instruction", None)
                 return _orig_text(*args, **kwargs)
 
-        questionary.text = _patched_text
+        questionary.text = cast(Any, _patched_text)
 except Exception:
     # 任何意外不应阻止程序启动，记录并继续
     try:
@@ -314,7 +315,7 @@ class VersionManager:
             repo = Repo(str(self.repo_path))
         except Exception as e:
             logger.error(f"无法打开 Git 仓库: {e}")
-            console.print(f"[red]❌ 目录不是一个 Git 仓库或无法访问[/red]")
+            console.print("[red]❌ 目录不是一个 Git 仓库或无法访问[/red]")
             return False
 
         try:
@@ -759,11 +760,12 @@ class AwinRPA:
 
     def _notify(self, title: str, message: str):
         try:
-            from plyer import notification
+            from notifypy import Notify
 
-            notification.notify(
-                title=title, message=message, app_name="Awin RPA", timeout=5
-            )
+            notification = Notify(default_notification_application_name="Awin RPA")
+            notification.title = title
+            notification.message = message
+            notification.send()
         except Exception:
             try:
                 logger.info(f"[通知]{title}: {message}")
@@ -949,7 +951,7 @@ class AwinRPA:
 
     def _get_invite_modal_state(self) -> dict[str, object]:
         """读取结果弹窗与邀请表单的可见状态。"""
-        fallback = {
+        fallback: dict[str, object] = {
             "popup_border_exists": False,
             "popup_border_visible": False,
             "membership_modal_exists": False,
@@ -1631,7 +1633,7 @@ class AppUI:
             )
             return
 
-        console.print(f"[bold yellow]发现新版本！[/bold yellow]")
+        console.print("[bold yellow]发现新版本！[/bold yellow]")
         console.print(f"  当前版本: [red]{result['local_version']}[/red]")
         console.print(f"  最新版本: [green]{result['remote_version']}[/green]\n")
 
