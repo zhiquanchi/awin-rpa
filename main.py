@@ -68,7 +68,9 @@ from dulwich.repo import Repo
 from rich.console import Console
 from rich.panel import Panel
 
+from app_interfaces import InvitationTemplate
 from config_manager import ConfigManager
+from json_template_repository import JsonTemplateRepository
 
 console = Console()
 logger.add("file.log")
@@ -530,18 +532,17 @@ class MessageManager:
     """邀请信息管理器"""
 
     def __init__(self, file_path: Path | None = None):
-        self.file_path = file_path or Path(__file__).parent / "invitation_messages.json"
+        self.repository = JsonTemplateRepository(file_path=file_path)
+        self.file_path = self.repository.file_path
 
     def load(self) -> list[dict]:
         """从文件加载所有邀请信息"""
-        if self.file_path.exists():
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    messages = json.load(f)
-                    if messages:
-                        return messages
-            except (json.JSONDecodeError, IOError):
-                pass
+        messages = [
+            template.to_storage_record()
+            for template in self.repository.load_templates()
+        ]
+        if messages:
+            return messages
         console.print(
             "[yellow]⚠️ 未找到邀请信息配置文件，请先在设置模式中添加邀请信息[/yellow]"
         )
@@ -549,8 +550,11 @@ class MessageManager:
 
     def save(self, messages: list[dict]):
         """保存邀请信息到文件"""
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        templates = [
+            InvitationTemplate.from_storage_record(message, index)
+            for index, message in enumerate(messages, start=1)
+        ]
+        self.repository.save_templates(templates)
 
     def display(self, messages: list[dict]):
         """显示所有邀请信息"""
@@ -1445,6 +1449,14 @@ class AwinRPA:
             logger.error(f"清空已点击记录文件失败: {e}")
         logger.info(f"已重置已点击记录，共清除 {count} 条")
         return count
+
+    def clicked_publisher_count(self) -> int:
+        """返回当前已点击记录数量。"""
+        return len(self._clicked_publisher_ids)
+
+    def has_clicked_publisher(self, publisher_id: str) -> bool:
+        """判断某个 publisher 是否已经处理过。"""
+        return publisher_id in self._clicked_publisher_ids
 
     def run(self, invite_count: int, msg: str, template_name: str = ""):
         """

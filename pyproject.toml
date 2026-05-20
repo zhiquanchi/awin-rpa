@@ -4,6 +4,7 @@ version = "0.2.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
+scripts = { awin-pyside6 = "pyside6_app:main" }
 dependencies = [
     "beautifulsoup4>=4.14.2",
     "drissionpage>=4.1.1.2",
@@ -16,4 +17,13 @@ dependencies = [
     "rich>=13.7.0",
     "textual>=3.0.0",
     "notify-py>=0.3.2",
+    "pydantic>=2.11.5",
+    "pyside6>=6.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-qt>=4.4.0",
+    "responses>=0.25.7",
 ]

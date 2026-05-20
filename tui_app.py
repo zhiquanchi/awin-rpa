@@ -3,9 +3,9 @@ AWIN RPA - 模板管理和预览 TUI 界面
 基于 Textual 框架
 """
 
+from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
-import json
+
 import pyperclip
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
@@ -21,14 +21,22 @@ from textual.widgets import (
     RichLog,
 )
 from textual.reactive import reactive
-from textual.message import Message
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work
 
-# 导入 main.py 中的类
-from main import MessageManager, AwinRPA, Updater, _load_id_set, CLICKED_IDS_PATH
+from app_interfaces import (
+    AppRuntimeStateViewModel,
+    InvitationTemplate,
+    SettingsRepositoryProtocol,
+    SyncServiceProtocol,
+    TemplateRepositoryProtocol,
+)
+from awin_application_service import AwinApplicationService
+from main import Updater
 from config_manager import ConfigManager
+from json_template_repository import JsonTemplateRepository
+from remote_sync_service import RemoteSyncService, get_machine_uid
 from loguru import logger
 
 
@@ -126,28 +134,12 @@ class ConfirmQuitScreen(ConfirmDialog):
         super().__init__(title="确认退出", message="确定要退出应用吗？")
 
 
-class Template:
-    """模板数据类"""
-
-    def __init__(self, id: int, name: str, content: str):
-        self.id = id
-        self.name = name
-        self.content = content
-    
-    def to_dict(self) -> dict:
-        """转换为字典（用于保存）"""
-        return {"name": self.name, "content": self.content}
-    
-    @classmethod
-    def from_dict(cls, data: dict, id: int) -> "Template":
-        """从字典创建（用于加载）"""
-        return cls(id=id, name=data.get("name", ""), content=data.get("content", ""))
-
-
 class TemplateListItem(ListItem):
     """模板列表项"""
 
-    def __init__(self, template: Template, is_active: bool = False) -> None:
+    def __init__(
+        self, template: InvitationTemplate, is_active: bool = False
+    ) -> None:
         super().__init__()
         self.template = template
         self.is_active = is_active
@@ -169,68 +161,71 @@ class TemplateManagerApp(App):
     ]
 
     # 响应式状态
-    selected_template: reactive[Template | None] = reactive(None)
+    selected_template: reactive[InvitationTemplate | None] = reactive(None)
     is_template_editing: reactive[bool] = reactive(False)
     is_count_editing: reactive[bool] = reactive(False)
     is_notify_editing: reactive[bool] = reactive(False)
     send_count: reactive[int] = reactive(10)
     is_running: reactive[bool] = reactive(False)
 
-    def __init__(self):
+    def __init__(
+        self,
+        template_repository: TemplateRepositoryProtocol | None = None,
+        config_manager_factory: Callable[[], SettingsRepositoryProtocol] | None = None,
+        sync_service_factory: (
+            Callable[[str, str], SyncServiceProtocol] | None
+        ) = None,
+        uid_provider: Callable[[], str] | None = None,
+    ) -> None:
         super().__init__()
-        
-        # 使用 main.py 中的 MessageManager 管理模板
-        self.message_manager = MessageManager()
-        # 配置管理器
-        self.config_manager = ConfigManager()
-        
-        # 从配置文件加载模板
-        self.templates: list[Template] = self._load_templates()
-        
-        # 从配置文件加载发送数量
-        self.send_count = self.config_manager.send_count
-        self.notify_channel: str = self.config_manager.notify_channel
-        self.feishu_webhook_url: str = self.config_manager.feishu_webhook_url
-        
+
+        config_factory = config_manager_factory or ConfigManager
+        sync_factory = sync_service_factory or RemoteSyncService
+        uid_factory = uid_provider or get_machine_uid
+        self.template_repository = template_repository or JsonTemplateRepository()
+        self.app_service = AwinApplicationService(
+            template_repository=self.template_repository,
+            settings_factory=config_factory,
+            sync_service_factory=sync_factory,
+            uid_provider=uid_factory,
+        )
+        runtime_state = self.app_service.bootstrap()
+        self.config_manager = self.app_service.settings_repository
+        self.sync_service = self.app_service.sync_service
+        self.uid = self.app_service.uid
+        self.templates: list[InvitationTemplate] = runtime_state.templates.templates
+        self.send_count = runtime_state.settings.send_count
+        self.notify_channel: str = runtime_state.settings.notify_channel
+        self.feishu_webhook_url: str = runtime_state.settings.feishu_webhook_url
+
         self.editing_content: str = ""
         self.editing_count: int = self.send_count
         self.editing_notify_channel: str = self.notify_channel
         self.editing_feishu_webhook_url: str = self.feishu_webhook_url
         self.execution_task = None
-        
-        # RPA 实例（延迟初始化，避免启动时连接浏览器）
-        self._rpa: AwinRPA | None = None
 
-    def _load_templates(self) -> list[Template]:
+    def _load_templates(self) -> list[InvitationTemplate]:
         """从配置文件加载模板"""
-        # 直接读取 JSON 文件，避免 console.print 的编码问题
-        file_path = self.message_manager.file_path
-        messages = []
-        
-        if file_path.exists():
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    messages = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        
-        if not messages:
-            # 如果没有模板，创建默认模板
-            default_templates = [
-                {"name": "默认模板", "content": "请输入模板内容..."}
-            ]
-            self.message_manager.save(default_templates)
-            messages = default_templates
-        
-        return [
-            Template.from_dict(msg, idx + 1)
-            for idx, msg in enumerate(messages)
-        ]
-    
-    def _save_templates(self):
+        return self.template_repository.ensure_default_templates()
+
+    def _save_templates(self) -> None:
         """保存模板到配置文件"""
-        messages = [t.to_dict() for t in self.templates]
-        self.message_manager.save(messages)
+        self.template_repository.save_templates(self.templates)
+        self.sync_service.push_config(
+            "invitation_messages",
+            self.template_repository.to_sync_payload(self.templates),
+        )
+
+    def _sync_settings(self) -> None:
+        """同步当前配置到远端。"""
+        self.sync_service.push_config("tui_config", self.config_manager.to_sync_payload())
+
+    def _apply_service_state(self, state: AppRuntimeStateViewModel) -> None:
+        """把应用服务状态同步回当前 TUI。"""
+        self.templates = state.templates.templates
+        self.send_count = state.settings.send_count
+        self.notify_channel = state.settings.notify_channel
+        self.feishu_webhook_url = state.settings.feishu_webhook_url
 
     def compose(self) -> ComposeResult:
         """创建 UI 组件"""
@@ -561,11 +556,7 @@ class TemplateManagerApp(App):
 
     def action_reset_clicked(self) -> None:
         """重置已点击记录（显示确认弹窗）"""
-        if self._rpa is not None:
-            count = len(self._rpa._clicked_publisher_ids)
-        else:
-            # 未连接浏览器时，从文件读取记录数
-            count = len(_load_id_set(CLICKED_IDS_PATH))
+        count = self.app_service.get_state().connection.clicked_records_count
 
         if count == 0:
             self.notify("当前没有已点击记录，无需重置", severity="warning")
@@ -584,20 +575,14 @@ class TemplateManagerApp(App):
         if not confirmed:
             return
 
-        if self._rpa is not None:
-            cleared = self._rpa.reset_clicked_ids()
-        else:
-            # 未连接浏览器时，直接清空文件
-            count = len(_load_id_set(CLICKED_IDS_PATH))
-            try:
-                if CLICKED_IDS_PATH.exists():
-                    CLICKED_IDS_PATH.write_text("", encoding="utf-8")
-            except Exception as e:
-                logger.error(f"清空已点击记录文件失败: {e}")
-                self.notify("重置失败", severity="error")
-                return
-            cleared = count
+        try:
+            cleared, service_state = self.app_service.reset_clicked_ids()
+        except Exception as error:
+            logger.error(f"重置已点击记录失败: {error}")
+            self.notify("重置失败", severity="error")
+            return
 
+        self._apply_service_state(service_state)
         self._add_log("success", f"已清除 {cleared} 条已点击记录")
         self.notify(f"已成功清除 {cleared} 条已点击记录")
 
@@ -608,11 +593,11 @@ class TemplateManagerApp(App):
         if active_index < 0 or active_index >= len(self.templates):
             self.notify("请先激活一个模板", severity="warning")
             return
-        
-        if self._rpa is not None:
+
+        if self.app_service.get_state().connection.browser_connected:
             self.notify("浏览器已连接", severity="warning")
             return
-        
+
         self._add_log("info", "正在连接浏览器...")
         self._connect_browser()
 
@@ -620,21 +605,19 @@ class TemplateManagerApp(App):
     def _connect_browser(self) -> None:
         """后台连接浏览器"""
         try:
-            self._rpa = AwinRPA(
-                notify_channel=self.notify_channel,
-                feishu_webhook_url=self.feishu_webhook_url,
-            )
-            self.call_from_thread(self._on_browser_connected)
-        except Exception as e:
-            logger.error(f"连接浏览器失败: {e}")
-            self.call_from_thread(self._add_log, "error", f"连接浏览器失败: {e}")
+            service_state = self.app_service.connect_browser()
+            self.call_from_thread(self._on_browser_connected, service_state)
+        except Exception as error:
+            logger.error(f"连接浏览器失败: {error}")
+            self.call_from_thread(self._add_log, "error", f"连接浏览器失败: {error}")
             self.call_from_thread(self._update_status, "连接失败")
 
-    def _on_browser_connected(self) -> None:
+    def _on_browser_connected(self, state: AppRuntimeStateViewModel) -> None:
         """浏览器连接成功回调"""
+        self._apply_service_state(state)
         self._add_log("success", "浏览器连接成功")
         self._update_status("浏览器已连接，等待执行...")
-        
+
         # 更新连接按钮状态
         btn = self.query_one("#btn-connect", Button)
         btn.label = "已连接"
@@ -685,6 +668,8 @@ class TemplateManagerApp(App):
         
         # 保存到配置
         self.config_manager.active_template_index = index
+        # 同步到云端
+        self._sync_settings()
         
         # 刷新列表以显示激活标记
         self._refresh_template_list()
@@ -695,7 +680,11 @@ class TemplateManagerApp(App):
     def action_add_template(self) -> None:
         """增加模板"""
         new_id = max((t.id for t in self.templates), default=0) + 1
-        new_template = Template(new_id, f"新模板{new_id}", "请输入模板内容...")
+        new_template = InvitationTemplate(
+            id=new_id,
+            name=f"新模板{new_id}",
+            content="请输入模板内容...",
+        )
         self.templates.append(new_template)
         self._save_templates()  # 保存到配置文件
         self._refresh_template_list()
@@ -827,6 +816,9 @@ class TemplateManagerApp(App):
         self.query_one("#btn-save-count").add_class("hidden")
         self.query_one("#btn-cancel-count").add_class("hidden")
 
+        # 同步到云端
+        self._sync_settings()
+
         self._add_log("success", f"发送数量已更新为 {self.send_count} 个（已保存）")
 
     def _cancel_count_edit(self) -> None:
@@ -920,6 +912,9 @@ class TemplateManagerApp(App):
         self.query_one("#feishu-webhook-input").add_class("hidden")
         self.is_notify_editing = False
 
+        # 同步到云端
+        self._sync_settings()
+
         self._add_log(
             "success",
             f"通知配置已保存：{self._channel_to_text(self.notify_channel)}",
@@ -959,8 +954,8 @@ class TemplateManagerApp(App):
         if not self.selected_template:
             self.notify("请先选择一个模板", severity="warning")
             return
-        
-        if self._rpa is None:
+
+        if not self.app_service.get_state().connection.browser_connected:
             self.notify("请先连接浏览器", severity="warning")
             return
 
@@ -985,77 +980,25 @@ class TemplateManagerApp(App):
     def _run_execution(self) -> None:
         """后台执行 RPA 任务（在独立线程中运行）"""
         try:
-            # 获取模板内容和发送数量
-            msg = self.selected_template.content
-            self._rpa.current_template_name = self.selected_template.name
-            invite_count = self.send_count
-            sent_count = 0
-            
-            while sent_count < invite_count and self.is_running:
-                # 每次循环都重新从网页获取所有 publisher IDs
-                self.call_from_thread(self._add_log, "info", "正在获取 publisher 列表...")
-                publisher_ids = self._rpa.get_publisher_ids()
-                
-                if not publisher_ids:
-                    self.call_from_thread(self._add_log, "info", "当前页面没有可邀请的 publisher，尝试下一页")
-                    self._rpa.click_next_page()
-                    continue
-                
-                self.call_from_thread(
-                    self._add_log, "info", 
-                    f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher"
-                )
-                
-                # 遍历所有 ID，找到第一个未发送过的并发送
-                found_new = False
-                for publisher_id in publisher_ids:
-                    if not self.is_running:
-                        break
-                    
-                    if sent_count >= invite_count:
-                        break
-                    
-                    # 如果该 ID 已经点击过，跳过
-                    if publisher_id in self._rpa._clicked_publisher_ids:
-                        continue
-                    
-                    # 发送邀约
-                    self.call_from_thread(
-                        self._add_log, "info", 
-                        f"正在向 publisher {publisher_id} 发送邀请..."
-                    )
-                    
-                    success = self._rpa.send_invite_to_publisher(publisher_id, msg)
-                    if success:
-                        found_new = True
-                        sent_count += 1
-                        self.call_from_thread(
-                            self._add_log, "success", 
-                            f"第 {sent_count}/{invite_count} 条消息发送成功 (publisher: {publisher_id})"
-                        )
-                        # 发送成功后立即跳出内层循环，重新获取页面上的所有 ID
-                        break
-                    else:
-                        self.call_from_thread(
-                            self._add_log, "error", 
-                            f"发送失败 (publisher: {publisher_id})"
-                        )
-                
-                # 如果当前页所有 ID 都已经点击过，进入下一页
-                if not found_new and self.is_running:
-                    self.call_from_thread(self._add_log, "info", "当前页所有 ID 都已处理，进入下一页")
-                    self._rpa.click_next_page()
-            
-            if self.is_running:
-                self.call_from_thread(
-                    self._add_log, "success", 
-                    f"任务执行完成！共发送 {sent_count} 条邀请"
-                )
-                self.call_from_thread(self._stop_execution)
-                
-        except Exception as e:
-            logger.error(f"RPA 执行出错: {e}")
-            self.call_from_thread(self._add_log, "error", f"执行出错: {e}")
+            selected_template_id = self.selected_template.id if self.selected_template else None
+            self.app_service.select_template(selected_template_id)
+            self.app_service.execute_invites(
+                template_id=selected_template_id,
+                stop_requested=lambda: not self.is_running,
+                log_callback=lambda entry: self.call_from_thread(
+                    self._add_log, entry.level, entry.message
+                ),
+            )
+            self.call_from_thread(
+                self._apply_service_state, self.app_service.get_state()
+            )
+            self.call_from_thread(self._stop_execution)
+        except Exception as error:
+            logger.error(f"RPA 执行出错: {error}")
+            self.call_from_thread(self._add_log, "error", f"执行出错: {error}")
+            self.call_from_thread(
+                self._apply_service_state, self.app_service.get_state()
+            )
             self.call_from_thread(self._stop_execution)
 
     def _stop_execution(self, manual: bool = False) -> None:
