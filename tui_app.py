@@ -203,6 +203,7 @@ class TemplateManagerApp(App):
         self.editing_notify_channel: str = self.notify_channel
         self.editing_feishu_webhook_url: str = self.feishu_webhook_url
         self.execution_task = None
+        self._execution_stop_requested = False
 
     def _load_templates(self) -> list[InvitationTemplate]:
         """从配置文件加载模板"""
@@ -226,6 +227,25 @@ class TemplateManagerApp(App):
         self.send_count = state.settings.send_count
         self.notify_channel = state.settings.notify_channel
         self.feishu_webhook_url = state.settings.feishu_webhook_url
+
+    def _guard_template_mutation(self) -> bool:
+        """在执行期间阻止模板变更。"""
+        if not self.is_running:
+            return True
+        self.notify("执行期间不允许修改模板", severity="warning")
+        return False
+
+    def _set_template_mutation_controls_enabled(self, enabled: bool) -> None:
+        """统一切换模板变更相关控件的启用状态。"""
+        for button_id in (
+            "#btn-add",
+            "#btn-delete",
+            "#btn-activate",
+            "#btn-edit-template",
+            "#btn-save-template",
+        ):
+            self.query_one(button_id, Button).disabled = not enabled
+        self.query_one("#template-list", ListView).disabled = not enabled
 
     def compose(self) -> ComposeResult:
         """创建 UI 组件"""
@@ -382,6 +402,20 @@ class TemplateManagerApp(App):
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """处理列表选择事件"""
+        if self.is_running:
+            list_view = self.query_one("#template-list", ListView)
+            if self.selected_template is not None:
+                try:
+                    index = next(
+                        i
+                        for i, template in enumerate(self.templates)
+                        if template.id == self.selected_template.id
+                    )
+                    list_view.index = index
+                except StopIteration:
+                    list_view.index = 0
+            event.stop()
+            return
         if isinstance(event.item, TemplateListItem):
             self.selected_template = event.item.template
             self._update_preview()
@@ -635,6 +669,8 @@ class TemplateManagerApp(App):
 
     def action_confirm_delete(self) -> None:
         """确认删除模板（显示确认弹窗）"""
+        if not self._guard_template_mutation():
+            return
         if not self.selected_template:
             self.notify("请先选择要删除的模板", severity="warning")
             return
@@ -655,6 +691,8 @@ class TemplateManagerApp(App):
 
     def action_activate_template(self) -> None:
         """激活当前选中的模板"""
+        if not self._guard_template_mutation():
+            return
         if not self.selected_template:
             self.notify("请先选择要激活的模板", severity="warning")
             return
@@ -679,6 +717,8 @@ class TemplateManagerApp(App):
 
     def action_add_template(self) -> None:
         """增加模板"""
+        if not self._guard_template_mutation():
+            return
         new_id = max((t.id for t in self.templates), default=0) + 1
         new_template = InvitationTemplate(
             id=new_id,
@@ -695,6 +735,8 @@ class TemplateManagerApp(App):
 
     def action_delete_template(self) -> None:
         """删除模板"""
+        if not self._guard_template_mutation():
+            return
         if not self.selected_template:
             self.notify("请先选择要删除的模板", severity="warning")
             return
@@ -717,6 +759,8 @@ class TemplateManagerApp(App):
 
     def action_edit_template(self) -> None:
         """开始编辑模板"""
+        if not self._guard_template_mutation():
+            return
         if not self.selected_template:
             self.notify("请先选择要修改的模板", severity="warning")
             return
@@ -736,6 +780,8 @@ class TemplateManagerApp(App):
 
     def action_save_template(self) -> None:
         """保存模板编辑"""
+        if not self._guard_template_mutation():
+            return
         if not self.is_template_editing or not self.selected_template:
             return
 
@@ -955,11 +1001,16 @@ class TemplateManagerApp(App):
             self.notify("请先选择一个模板", severity="warning")
             return
 
+        if self.is_template_editing:
+            self.notify("开始执行前请先保存或取消当前模板编辑", severity="warning")
+            return
+
         if not self.app_service.get_state().connection.browser_connected:
             self.notify("请先连接浏览器", severity="warning")
             return
 
         self.is_running = True
+        self._execution_stop_requested = False
         btn = self.query_one("#btn-execute", Button)
         btn.label = "停止执行"
         btn.variant = "error"
@@ -968,6 +1019,7 @@ class TemplateManagerApp(App):
         self.query_one("#template-section").add_class("running")
         self.query_one("#send-count-section").add_class("running")
         self.query_one("#execution-section").add_class("running")
+        self._set_template_mutation_controls_enabled(False)
 
         self._add_log("info", "开始执行任务...")
         self._add_log("info", f"使用模板: {self.selected_template.name}")
@@ -1006,6 +1058,12 @@ class TemplateManagerApp(App):
         was_running = self.is_running
         self.is_running = False
 
+        if manual and was_running:
+            self._execution_stop_requested = True
+            self._add_log("error", "任务已手动停止")
+            self._update_status("正在停止...")
+            return
+
         btn = self.query_one("#btn-execute", Button)
         btn.label = "开始执行"
         btn.variant = "success"
@@ -1014,11 +1072,12 @@ class TemplateManagerApp(App):
         self.query_one("#template-section").remove_class("running")
         self.query_one("#send-count-section").remove_class("running")
         self.query_one("#execution-section").remove_class("running")
+        self._set_template_mutation_controls_enabled(True)
 
-        if manual and was_running:
-            self._add_log("error", "任务已手动停止")
+        if getattr(self, "_execution_stop_requested", False):
             self._update_status("已停止")
-        elif not manual:
+            self._execution_stop_requested = False
+        else:
             self._update_status("执行完成，等待下一次执行...")
 
 

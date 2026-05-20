@@ -15,7 +15,7 @@ from app_interfaces import (
     SettingsViewModel,
     TemplatePanelViewModel,
 )
-from pyside6_app import MainWindow
+from pyside6_app import ExecuteInvitesWorker, MainWindow
 
 
 class FakeApplicationService:
@@ -203,3 +203,48 @@ def test_add_template_button_refreshes_list(qtbot: Any) -> None:
 
     assert service.add_calls == 1
     assert window.template_list.count() == 2
+
+
+def test_execute_click_disables_template_mutation_controls(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """开始执行后应立即禁用模板变更控件。"""
+    service = FakeApplicationService()
+    window = MainWindow(service=service)
+    qtbot.addWidget(window)
+
+    monkeypatch.setattr(ExecuteInvitesWorker, "start", lambda self: None)
+
+    qtbot.mouseClick(window.execute_button, Qt.LeftButton)
+
+    assert window.add_template_button.isEnabled() is False
+    assert window.save_template_button.isEnabled() is False
+    assert window.delete_template_button.isEnabled() is False
+    assert window.activate_template_button.isEnabled() is False
+    assert window.sync_remote_button.isEnabled() is False
+    assert window.template_list.isEnabled() is False
+    assert window.template_name_input.isReadOnly() is True
+    assert window.template_content_edit.isReadOnly() is True
+
+
+def test_execute_is_blocked_when_template_has_unsaved_changes(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未保存模板改动时不应开始执行。"""
+    service = FakeApplicationService()
+    window = MainWindow(service=service)
+    qtbot.addWidget(window)
+    warning_messages: list[str] = []
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warning_messages.append(message)
+        or QMessageBox.StandardButton.Ok,
+    )
+
+    window.template_content_edit.setPlainText("未保存的新内容")
+    qtbot.mouseClick(window.execute_button, Qt.LeftButton)
+
+    assert warning_messages == ["开始执行前请先保存当前模板修改。"]
+    assert window._execute_worker is None

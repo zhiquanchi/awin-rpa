@@ -153,6 +153,8 @@ class MainWindow(QMainWindow):
         settings_form = QFormLayout()
         self.send_count_input = QSpinBox(right_panel)
         self.send_count_input.setRange(1, 9999)
+        self.send_count_input = QSpinBox(right_panel)
+        self.send_count_input.setRange(1, 9999)
         self.notify_channel_combo = QComboBox(right_panel)
         self.notify_channel_combo.addItem("仅本地通知", "desktop")
         self.notify_channel_combo.addItem("仅飞书通知", "feishu")
@@ -219,6 +221,19 @@ class MainWindow(QMainWindow):
         )
         self.connect_button.setDisabled(state.connection.browser_connected)
         self.execute_button.setText("停止执行" if state.execution.is_running else "开始执行")
+        self.execute_button.setDisabled(False)
+        self._set_template_mutation_enabled(not state.execution.is_running)
+
+    def _set_template_mutation_enabled(self, enabled: bool) -> None:
+        """统一切换模板变更相关控件的启用状态。"""
+        self.template_name_input.setReadOnly(not enabled)
+        self.template_content_edit.setReadOnly(not enabled)
+        self.template_list.setDisabled(not enabled)
+        self.add_template_button.setDisabled(not enabled)
+        self.save_template_button.setDisabled(not enabled)
+        self.delete_template_button.setDisabled(not enabled)
+        self.activate_template_button.setDisabled(not enabled)
+        self.sync_remote_button.setDisabled(not enabled)
 
     def _populate_template_list(self) -> None:
         """刷新模板列表。"""
@@ -260,6 +275,17 @@ class MainWindow(QMainWindow):
                 return template
         return None
 
+    def _has_unsaved_template_changes(self) -> bool:
+        """判断当前模板输入区是否有未保存改动。"""
+        selected_template = self._find_selected_template()
+        if selected_template is None:
+            return False
+
+        return (
+            self.template_name_input.text() != selected_template.name
+            or self.template_content_edit.toPlainText() != selected_template.content
+        )
+
     def _current_template_id(self) -> int | None:
         """读取当前列表选中的模板 ID。"""
         current_item = self.template_list.currentItem()
@@ -278,11 +304,16 @@ class MainWindow(QMainWindow):
         if self._building_ui:
             return
 
+        if self._runtime_state.execution.is_running:
+            self._apply_state(self._runtime_state)
+            return
+
         template_id = self._current_template_id()
         try:
             self._runtime_state = self.service.select_template(template_id)
         except Exception as error:
             self._show_error(str(error))
+            self._apply_state(self._runtime_state)
             return
         self._load_selected_template()
 
@@ -436,6 +467,10 @@ class MainWindow(QMainWindow):
             self.execute_button.setText("正在停止...")
             return
 
+        if self._has_unsaved_template_changes():
+            self._show_warning("开始执行前请先保存当前模板修改。")
+            return
+
         template_id = self._current_template_id()
         try:
             self._runtime_state = self.service.select_template(template_id)
@@ -443,12 +478,13 @@ class MainWindow(QMainWindow):
             self._show_error(str(error))
             return
 
-        self._apply_state(self.service.get_state())
+        self._runtime_state.execution.is_running = True
         self._execute_worker = ExecuteInvitesWorker(self.service, template_id)
         self._execute_worker.log_emitted.connect(self._on_execution_log_emitted)
         self._execute_worker.completed.connect(self._on_execution_completed)
         self._execute_worker.failed.connect(self._on_execution_failed)
         self.execute_button.setText("停止执行")
+        self._set_template_mutation_enabled(False)
         self._execute_worker.start()
 
     def _on_execution_log_emitted(self, entry: ExecutionLogEntryViewModel) -> None:

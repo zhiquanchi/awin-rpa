@@ -73,6 +73,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """重新从远端拉取配置并刷新本地运行态。"""
         with self._lock:
             self._ensure_bootstrapped()
+            self._ensure_template_mutation_allowed()
             pulled_bundle = self.sync_service.pull_configs()
             self._apply_pulled_bundle(pulled_bundle)
             self.settings_repository = self._settings_factory()
@@ -88,6 +89,8 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """切换当前选中的模板。"""
         with self._lock:
             self._ensure_bootstrapped()
+            if self._execution_state.is_running:
+                raise ValueError("执行期间不允许切换模板。")
             templates = self._load_templates()
             if template_id is None:
                 self._selected_template_id = None
@@ -105,6 +108,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """新增模板并返回更新后的运行态。"""
         with self._lock:
             self._ensure_bootstrapped()
+            self._ensure_template_mutation_allowed()
             templates = self._load_templates()
             new_id = max((template.id for template in templates), default=0) + 1
             new_template = InvitationTemplate(
@@ -123,6 +127,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """保存模板内容并返回更新后的运行态。"""
         with self._lock:
             self._ensure_bootstrapped()
+            self._ensure_template_mutation_allowed()
             templates = self._load_templates()
             updated_templates: list[InvitationTemplate] = []
             updated = False
@@ -152,6 +157,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """删除模板并同步修正激活索引。"""
         with self._lock:
             self._ensure_bootstrapped()
+            self._ensure_template_mutation_allowed()
             templates = self._load_templates()
             active_template_id = self._get_active_template_id(templates)
             remaining_templates = [
@@ -176,6 +182,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """激活指定模板。"""
         with self._lock:
             self._ensure_bootstrapped()
+            self._ensure_template_mutation_allowed()
             templates = self._load_templates()
             for index, template in enumerate(templates):
                 if template.id == template_id:
@@ -429,6 +436,11 @@ class AwinApplicationService(ApplicationServiceProtocol):
         if not self._bootstrapped:
             self._initialize_runtime()
             self._bootstrapped = True
+
+    def _ensure_template_mutation_allowed(self) -> None:
+        """确保执行期间不会发生模板变更。"""
+        if self._execution_state.is_running:
+            raise ValueError("执行期间不允许修改模板。")
 
     def _apply_pulled_bundle(self, pulled_bundle: PulledConfigBundle | None) -> None:
         """把远端拉取结果应用到本地存储。"""

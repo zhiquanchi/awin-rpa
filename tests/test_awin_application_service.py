@@ -161,3 +161,36 @@ def test_connect_execute_and_reset_flow(local_paths: tuple[Path, Path]) -> None:
     assert "第 1/1 条消息发送成功 (publisher: 1001)" in log_messages
     assert cleared_count == 1
     assert reset_state.connection.clicked_records_count == 0
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda service: service.add_template(),
+        lambda service: service.save_template(1, "模板1", "新内容"),
+        lambda service: service.delete_template(1),
+        lambda service: service.activate_template(1),
+        lambda service: service.select_template(1),
+        lambda service: service.refresh_from_remote(),
+    ],
+)
+def test_template_mutation_is_blocked_while_running(
+    local_paths: tuple[Path, Path], operation
+) -> None:
+    """执行期间不允许修改模板。"""
+    config_path, template_path = local_paths
+    repository = JsonTemplateRepository(file_path=template_path)
+    repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
+    settings = ConfigManager(config_path=config_path)
+    settings.active_template_index = 0
+    fake_sync_service = FakeSyncService()
+    service = AwinApplicationService(
+        template_repository=repository,
+        settings_factory=lambda: ConfigManager(config_path=config_path),
+        sync_service_factory=lambda _url, _uid: fake_sync_service,
+    )
+    service.bootstrap()
+    service._execution_state.is_running = True
+
+    with pytest.raises(ValueError, match="执行期间不允许(修改|切换)模板"):
+        operation(service)
