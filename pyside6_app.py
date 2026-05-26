@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        splitter = QSplitter(Qt.Horizontal, self)
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
         main_layout.addWidget(splitter)
 
         left_panel = QWidget(splitter)
@@ -245,7 +245,7 @@ class MainWindow(QMainWindow):
         for template in self._runtime_state.templates.templates:
             prefix = "[*] " if template.id == active_template_id else ""
             item = QListWidgetItem(f"{prefix}{template.name}")
-            item.setData(Qt.UserRole, template.id)
+            item.setData(Qt.ItemDataRole.UserRole, template.id)
             self.template_list.addItem(item)
             if template.id == selected_template_id:
                 self.template_list.setCurrentItem(item)
@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         current_item = self.template_list.currentItem()
         if current_item is None:
             return None
-        data = current_item.data(Qt.UserRole)
+        data = current_item.data(Qt.ItemDataRole.UserRole)
         return int(data) if data is not None else None
 
     def _set_notify_channel(self, channel: str) -> None:

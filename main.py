@@ -79,7 +79,6 @@ logger.add("file.log")
 AUDIT_LOG_PATH = Path(__file__).parent / "awin_audit.jsonl"
 SEEN_IDS_PATH = Path(__file__).parent / "seen_publisher_ids.txt"
 CLICKED_IDS_PATH = Path(__file__).parent / "clicked_publisher_ids.txt"
-HTML_DUMP_DIR = Path(__file__).parent / "html_dumps"
 FEISHU_WEBHOOK_PATH = Path(__file__).parent / "feishu_webhook.txt"
 BROWSER_DEBUG_HOST = (
     os.getenv("AWIN_BROWSER_DEBUG_HOST", "127.0.0.1") or "127.0.0.1"
@@ -785,54 +784,6 @@ class AwinRPA:
         """
         logger.info(f"邀请失败（已跳过）: publisher={publisher_id}，原因={reason}")
 
-    def _safe_get_html(self) -> str:
-        try:
-            html = getattr(self.tab, "html", None)
-            if isinstance(html, str) and html:
-                return html
-        except Exception:
-            pass
-
-        try:
-            run_js = getattr(self.tab, "run_js", None)
-            if callable(run_js):
-                html = run_js("return document.documentElement.outerHTML")
-                if isinstance(html, str) and html:
-                    return html
-        except Exception:
-            pass
-
-        return ""
-
-    def _dump_html(self, publisher_id: str, phase: str) -> str | None:
-        try:
-            html = self._safe_get_html()
-            if not html:
-                return None
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-            safe_pid = (
-                "".join(
-                    ch for ch in str(publisher_id) if ch.isalnum() or ch in ("-", "_")
-                )[:64]
-                or "unknown"
-            )
-            HTML_DUMP_DIR.mkdir(parents=True, exist_ok=True)
-            path = (
-                HTML_DUMP_DIR
-                / f"{ts}_clickseq{self._click_seq}_pid{safe_pid}_{phase}.html"
-            )
-            path.write_text(html, encoding="utf-8", errors="ignore")
-            return str(path)
-        except Exception:
-            return None
-
-    def _save_snapshot(self, publisher_id: str, phase: str) -> str | None:
-        """
-        保存 HTML 快照用于对比
-        返回 HTML 文件路径
-        """
-        return self._dump_html(publisher_id, phase)
-
     def _select_awin_tab(self):
         """
         选择 URL 中包含 'awin' 的标签页；若未找到则回退为最新标签页
@@ -1196,15 +1147,6 @@ class AwinRPA:
             clicked_before=clicked_before,
         )
 
-        # 在点击前保存快照
-        html_before = self._save_snapshot(publisher_id, "before_click")
-        self._audit(
-            "snapshot_before_click",
-            click_seq=self._click_seq,
-            publisher_id=publisher_id,
-            html_path=html_before,
-        )
-
         # 查找对应的邀请按钮
         invite_link = self.tab.ele(
             f'xpath=//a[@data-publisherid="{publisher_id}"]', timeout=2
@@ -1213,14 +1155,11 @@ class AwinRPA:
             logger.warning(
                 f"找不到 publisher ID: {publisher_id} 的邀请按钮，尝试重新获取页面元素"
             )
-            # 保存失败时的快照
-            html_fail = self._save_snapshot(publisher_id, "button_not_found")
             self._audit(
                 "invite_button_missing",
                 click_seq=self._click_seq,
                 publisher_id=publisher_id,
                 after_refresh=False,
-                html_path=html_fail,
             )
             self.refresh_tab()
             invite_link = self.tab.ele(
@@ -1244,8 +1183,6 @@ class AwinRPA:
         try:
             invite_link.click()
         except Exception as e:
-            # 保存点击失败时的快照
-            html_fail = self._save_snapshot(publisher_id, "click_failed")
             self._audit(
                 "invite_click_failed",
                 click_seq=self._click_seq,
@@ -1257,7 +1194,6 @@ class AwinRPA:
                     "aria-disabled": invite_link.attr("aria-disabled"),
                     "href": invite_link.attr("href"),
                 },
-                html_path=html_fail,
             )
             self._notify_feishu_invite_failure(publisher_id, "点击失败")
             return False
@@ -1266,15 +1202,12 @@ class AwinRPA:
         try:
             custom_message = self.tab.ele("#customMessage", timeout=8)
             if not custom_message:
-                # 保存找不到输入框时的快照
-                html_fail = self._save_snapshot(publisher_id, "no_input_box")
                 self._audit(
                     "invite_click_failed",
                     click_seq=self._click_seq,
                     publisher_id=publisher_id,
                     stage="wait_custom_message",
                     error="customMessage_not_found",
-                    html_path=html_fail,
                 )
                 self._notify_feishu_invite_failure(publisher_id, "未找到输入框")
                 return False
@@ -1326,7 +1259,6 @@ class AwinRPA:
             result_popup_text = self._get_invite_result_popup_text()
             modal_state_before_close = self._get_invite_modal_state()
             if not popup_border_visible:
-                html_fail = self._save_snapshot(publisher_id, "popup_border_not_found")
                 self._audit(
                     "invite_send_failed",
                     click_seq=self._click_seq,
@@ -1335,14 +1267,12 @@ class AwinRPA:
                     error="popup_border_not_found",
                     popup_text=result_popup_text,
                     modal_state_before_close=modal_state_before_close,
-                    html_path=html_fail,
                 )
                 self._notify_feishu_invite_failure(
                     publisher_id, "发送后未出现结果弹窗"
                 )
                 return False
             if self.INVITE_ALREADY_EXISTS_TEXT in result_popup_text.lower():
-                html_fail = self._save_snapshot(publisher_id, "invite_already_exists")
                 self._audit(
                     "invite_send_failed",
                     click_seq=self._click_seq,
@@ -1351,7 +1281,6 @@ class AwinRPA:
                     error="invitation_already_exists",
                     popup_text=result_popup_text,
                     modal_state_before_close=modal_state_before_close,
-                    html_path=html_fail,
                 )
                 closed = self._close_invite_result_popup(publisher_id)
                 dismissed = self._dismiss_invite_form_until_closed()
@@ -1381,9 +1310,6 @@ class AwinRPA:
             self.tab.wait(0.2, 10)
             modal_state_after_close = self._get_invite_modal_state()
             if bool(modal_state_after_close.get("membership_modal_visible")):
-                html_fail = self._save_snapshot(
-                    publisher_id, "membership_modal_still_visible"
-                )
                 self._audit(
                     "invite_send_failed",
                     click_seq=self._click_seq,
@@ -1393,7 +1319,6 @@ class AwinRPA:
                     popup_text=result_popup_text,
                     modal_state_before_close=modal_state_before_close,
                     modal_state_after_close=modal_state_after_close,
-                    html_path=html_fail,
                 )
                 dismissed = self._dismiss_invite_form_until_closed()
                 modal_state_after_cancel = self._get_invite_modal_state()
@@ -1426,13 +1351,10 @@ class AwinRPA:
             self._notify_feishu_invite_failure(publisher_id, "关闭弹窗失败")
             return False
 
-        # 保存成功发送后的快照
-        html_after = self._save_snapshot(publisher_id, "after_click")
         self._audit(
             "invite_sent_success",
             click_seq=self._click_seq,
             publisher_id=publisher_id,
-            html_path=html_after,
         )
         self._mark_publisher_processed(publisher_id)
         self.tab.wait(2, 3)
