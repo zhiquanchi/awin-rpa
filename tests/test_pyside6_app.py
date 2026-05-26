@@ -15,7 +15,12 @@ from app_interfaces import (
     SettingsViewModel,
     TemplatePanelViewModel,
 )
-from pyside6_app import ExecuteInvitesWorker, MainWindow
+from pyside6_app import (
+    ExecuteInvitesWorker,
+    MainWindow,
+    NotifyCard,
+    TemplateManagerDialog,
+)
 
 
 class FakeApplicationService:
@@ -24,7 +29,9 @@ class FakeApplicationService:
     def __init__(self) -> None:
         self.connect_calls = 0
         self.add_calls = 0
+        self.reset_calls = 0
         self.save_setting_calls = 0
+        self.notify_setting_calls = 0
         self.state = AppRuntimeStateViewModel(
             templates=TemplatePanelViewModel(
                 templates=[InvitationTemplate(id=1, name="模板1", content="内容1")],
@@ -47,26 +54,21 @@ class FakeApplicationService:
         )
 
     def bootstrap(self) -> AppRuntimeStateViewModel:
-        """返回初始状态。"""
         return self.state
 
     def refresh_from_remote(self) -> AppRuntimeStateViewModel:
-        """返回当前状态。"""
         return self.state
 
     def get_state(self) -> AppRuntimeStateViewModel:
-        """返回当前状态。"""
         return self.state
 
     def select_template(self, template_id: int | None) -> AppRuntimeStateViewModel:
-        """切换选中模板。"""
         self.state.templates.selected_template_id = template_id
         return self.state
 
     def add_template(
         self, name: str | None = None, content: str | None = None
     ) -> AppRuntimeStateViewModel:
-        """新增模板。"""
         self.add_calls += 1
         new_template = InvitationTemplate(id=2, name="模板2", content="内容2")
         self.state.templates.templates.append(new_template)
@@ -76,7 +78,6 @@ class FakeApplicationService:
     def save_template(
         self, template_id: int, name: str | None, content: str
     ) -> AppRuntimeStateViewModel:
-        """保存模板。"""
         for template in self.state.templates.templates:
             if template.id == template_id:
                 template.name = name or template.name
@@ -84,7 +85,6 @@ class FakeApplicationService:
         return self.state
 
     def delete_template(self, template_id: int) -> AppRuntimeStateViewModel:
-        """删除模板。"""
         self.state.templates.templates = [
             template
             for template in self.state.templates.templates
@@ -98,12 +98,10 @@ class FakeApplicationService:
         return self.state
 
     def activate_template(self, template_id: int) -> AppRuntimeStateViewModel:
-        """激活模板。"""
         self.state.templates.active_template_id = template_id
         return self.state
 
     def set_send_count(self, value: int) -> AppRuntimeStateViewModel:
-        """保存发送数量。"""
         self.save_setting_calls += 1
         self.state.settings.send_count = value
         return self.state
@@ -111,27 +109,26 @@ class FakeApplicationService:
     def set_notify_settings(
         self, channel: str, webhook_url: str
     ) -> AppRuntimeStateViewModel:
-        """保存通知设置。"""
+        self.notify_setting_calls += 1
         self.state.settings.notify_channel = channel
         self.state.settings.feishu_webhook_url = webhook_url
         return self.state
 
     def connect_browser(self) -> AppRuntimeStateViewModel:
-        """模拟浏览器连接。"""
         self.connect_calls += 1
         self.state.connection.browser_connected = True
         self.state.connection.status_text = "浏览器已连接，等待执行..."
         return self.state
 
     def reset_clicked_ids(self) -> tuple[int, AppRuntimeStateViewModel]:
-        """模拟重置记录。"""
+        self.reset_calls += 1
+        cleared = self.state.connection.clicked_records_count
         self.state.connection.clicked_records_count = 0
-        return 0, self.state
+        return cleared, self.state
 
     def execute_invites(
         self, template_id: int | None, stop_requested=None, log_callback=None
     ) -> ExecutionResultViewModel:
-        """返回固定执行结果。"""
         self.state.execution.is_running = False
         return ExecutionResultViewModel(
             sent_count=0,
@@ -144,7 +141,6 @@ class FakeApplicationService:
 
 @pytest.fixture(autouse=True)
 def patch_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
-    """避免测试期间弹窗阻塞。"""
     monkeypatch.setattr(
         QMessageBox,
         "information",
@@ -167,73 +163,127 @@ def patch_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _make_window(
+    service: FakeApplicationService, qtbot: Any, *, auto_connect: bool = False
+) -> MainWindow:
+    window = MainWindow(service=service, auto_connect_browser=auto_connect)
+    qtbot.addWidget(window)
+    return window
+
+
 def test_main_window_initializes_with_service_state(qtbot: Any) -> None:
     """主窗口应能使用外部服务完成初始化。"""
     service = FakeApplicationService()
-    window = MainWindow(service=service)
-    qtbot.addWidget(window)
+    window = _make_window(service, qtbot)
 
-    assert window.template_list.count() == 1
-    assert window.template_name_input.text() == "模板1"
+    assert window.sent_card.value_label.text() == "0"
+    assert window.template_card.value_label.text() == "模板1"
     assert window.send_count_input.value() == 3
+    assert isinstance(window.notify_card, NotifyCard)
+
+
+def test_notify_card_feishu_without_webhook_opens_config(qtbot: Any) -> None:
+    """未配置 Webhook 时点击飞书 Chip 不应开启飞书。"""
+    service = FakeApplicationService()
+    service.state.settings.notify_channel = "desktop"
+    service.state.settings.feishu_webhook_url = ""
+    window = _make_window(service, qtbot)
+    window._apply_state(service.state)
+
+    opened: list[bool] = []
+    window._on_open_notify_config = lambda focus_webhook=False: opened.append(  # type: ignore[method-assign]
+        focus_webhook
+    )
+
+    window.notify_card.master_checkbox.setChecked(True)
+    window.notify_card.feishu_chip.click()
+
+    assert window.notify_card.feishu_chip.isChecked() is False
+    assert opened == [True]
+
+
+def test_notify_card_toggle_persists_channel(qtbot: Any) -> None:
+    """卡片快捷开关应调用 set_notify_settings。"""
+    service = FakeApplicationService()
+    window = _make_window(service, qtbot)
+    window._apply_state(service.state)
+    calls_before = service.notify_setting_calls
+
+    window.notify_card.master_checkbox.setChecked(False)
+
+    assert service.notify_setting_calls == calls_before + 1
+    assert service.state.settings.notify_channel == "none"
 
 
 def test_connect_button_runs_worker(qtbot: Any) -> None:
-    """连接按钮应触发后台连接并刷新状态。"""
+    """浏览器按钮应触发后台连接并刷新状态。"""
     service = FakeApplicationService()
-    window = MainWindow(service=service)
-    qtbot.addWidget(window)
+    window = _make_window(service, qtbot)
 
-    qtbot.mouseClick(window.connect_button, Qt.LeftButton)
+    qtbot.mouseClick(window.browser_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(
-        lambda: window.browser_status_label.text() == "浏览器已连接，等待执行...",
+        lambda: window.browser_button.text() == "浏览器已连接",
         timeout=3000,
     )
 
-    assert window.browser_status_label.text() == "浏览器已连接，等待执行..."
+    assert service.connect_calls == 1
 
 
-def test_add_template_button_refreshes_list(qtbot: Any) -> None:
-    """新增模板按钮应刷新模板列表。"""
+def test_add_template_in_dialog_refreshes_state(qtbot: Any) -> None:
+    """模板管理弹窗应能新增模板。"""
     service = FakeApplicationService()
-    window = MainWindow(service=service)
-    qtbot.addWidget(window)
+    window = _make_window(service, qtbot)
 
-    qtbot.mouseClick(window.add_template_button, Qt.LeftButton)
+    dialog = TemplateManagerDialog(service, service.state, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.mouseClick(dialog.new_template_button, Qt.MouseButton.LeftButton)
+    dialog.close()
+    window._apply_state(service.get_state())
 
     assert service.add_calls == 1
-    assert window.template_list.count() == 2
+    assert len(service.state.templates.templates) == 2
 
 
-def test_execute_click_disables_template_mutation_controls(
+def test_reset_sent_card_clears_clicked_records(qtbot: Any) -> None:
+    """重置按钮应清空已发送记录。"""
+    service = FakeApplicationService()
+    service.state.connection.clicked_records_count = 5
+    window = _make_window(service, qtbot)
+    window._apply_state(service.state)
+
+    qtbot.mouseClick(window.sent_card.action_button, Qt.MouseButton.LeftButton)
+
+    assert service.reset_calls == 1
+    assert window.sent_card.value_label.text() == "0"
+
+
+def test_execute_click_disables_dashboard_controls(
     qtbot: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """开始执行后应立即禁用模板变更控件。"""
+    """开始执行后应禁用仪表盘上的变更控件。"""
     service = FakeApplicationService()
-    window = MainWindow(service=service)
-    qtbot.addWidget(window)
+    service.state.connection.browser_connected = True
+    window = _make_window(service, qtbot)
+    window._apply_state(service.state)
 
     monkeypatch.setattr(ExecuteInvitesWorker, "start", lambda self: None)
 
-    qtbot.mouseClick(window.execute_button, Qt.LeftButton)
+    qtbot.mouseClick(window.execute_button, Qt.MouseButton.LeftButton)
 
-    assert window.add_template_button.isEnabled() is False
-    assert window.save_template_button.isEnabled() is False
-    assert window.delete_template_button.isEnabled() is False
-    assert window.activate_template_button.isEnabled() is False
-    assert window.sync_remote_button.isEnabled() is False
-    assert window.template_list.isEnabled() is False
-    assert window.template_name_input.isReadOnly() is True
-    assert window.template_content_edit.isReadOnly() is True
+    assert window.template_card.action_button.isEnabled() is False
+    assert window.sent_card.action_button.isEnabled() is False
+    assert window.notify_card.isEnabled() is False
+    assert window.settings_button.isEnabled() is False
+    assert window.send_count_input.isEnabled() is False
 
 
-def test_execute_is_blocked_when_template_has_unsaved_changes(
+def test_execute_requires_browser_connection(
     qtbot: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未保存模板改动时不应开始执行。"""
+    """未连接浏览器时不应开始执行。"""
     service = FakeApplicationService()
-    window = MainWindow(service=service)
-    qtbot.addWidget(window)
+    window = _make_window(service, qtbot)
     warning_messages: list[str] = []
 
     monkeypatch.setattr(
@@ -243,8 +293,7 @@ def test_execute_is_blocked_when_template_has_unsaved_changes(
         or QMessageBox.StandardButton.Ok,
     )
 
-    window.template_content_edit.setPlainText("未保存的新内容")
-    qtbot.mouseClick(window.execute_button, Qt.LeftButton)
+    qtbot.mouseClick(window.execute_button, Qt.MouseButton.LeftButton)
 
-    assert warning_messages == ["开始执行前请先保存当前模板修改。"]
+    assert warning_messages == ["请先连接浏览器。"]
     assert window._execute_worker is None

@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>通知 UI 预览（卡片 + 配置页 + Webhook 拦截）</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      background: #f5f6f8;
+      color: #303133;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    h2 {
+      font-size: 17px;
+      margin: 32px 0 12px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #409eff;
+    }
+    .page-desc { color: #606266; font-size: 14px; margin-bottom: 16px; max-width: 900px; }
+    .open-tip {
+      margin-bottom: 20px;
+      padding: 12px 16px;
+      background: #ecf5ff;
+      border: 1px solid #d9ecff;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #409eff;
+    }
+    code { background: #f4f4f5; padding: 2px 6px; border-radius: 4px; }
+    .section-note {
+      font-size: 13px;
+      color: #909399;
+      margin-bottom: 16px;
+    }
+
+    /* 可交互演示区 */
+    .demo-layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .demo-layout { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e4e7ed;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .caption { font-size: 12px; color: #909399; }
+    .link-btn {
+      background: none; border: none; color: #409eff;
+      font-size: 12px; cursor: pointer;
+    }
+    .link-btn:hover { text-decoration: underline; }
+    .master-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+    .chip-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .chip {
+      border: 1px solid #dcdfe6; background: #f4f4f5; color: #606266;
+      border-radius: 16px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+    }
+    .chip.on { background: #ecf5ff; border-color: #b3d8ff; color: #409eff; font-weight: 600; }
+    .chip:disabled { opacity: 0.45; cursor: not-allowed; }
+    .chip.blocked { animation: shake 0.35s; border-color: #f56c6c; }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-4px); }
+      75% { transform: translateX(4px); }
+    }
+    .status-line { font-size: 12px; color: #606266; display: flex; align-items: center; gap: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .dot.ok { background: #67c23a; }
+    .dot.warn { background: #e6a23c; }
+    .dot.off { background: #c0c4cc; }
+
+    .demo-panel {
+      background: #fff;
+      border: 1px solid #e4e7ed;
+      border-radius: 10px;
+      padding: 20px;
+      min-height: 320px;
+    }
+    .demo-panel h3 { font-size: 15px; margin-bottom: 12px; }
+    .control-bar {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;
+    }
+    .ctrl-btn {
+      padding: 6px 12px; border-radius: 6px; border: 1px solid #dcdfe6;
+      background: #fff; font-size: 12px; cursor: pointer;
+    }
+    .ctrl-btn.active { background: #409eff; color: #fff; border-color: #409eff; }
+    .log-area {
+      background: #1e1e2e; color: #e5e9f0; border-radius: 8px;
+      padding: 12px; font-size: 12px; font-family: Consolas, monospace;
+      min-height: 140px; max-height: 200px; overflow-y: auto;
+    }
+    .log-area .warn { color: #e6a23c; }
+    .log-area .ok { color: #67c23a; }
+    .log-area .info { color: #909399; }
+
+    /* 配置弹窗 */
+    .modal-backdrop {
+      display: none;
+      position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+      z-index: 100; align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal {
+      background: #f5f6f8;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+      overflow: hidden;
+    }
+    .modal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 18px; background: #fff; border-bottom: 1px solid #e4e7ed;
+    }
+    .modal-header h4 { font-size: 16px; font-weight: 600; }
+    .modal-close {
+      border: none; background: none; font-size: 20px; color: #909399;
+      cursor: pointer; line-height: 1;
+    }
+    .modal-body { padding: 18px; }
+    .modal-footer {
+      display: flex; justify-content: flex-end; gap: 10px;
+      padding: 12px 18px; background: #fff; border-top: 1px solid #e4e7ed;
+    }
+    .dialog-card {
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 10px;
+      padding: 14px; margin-top: 12px;
+    }
+    .dialog-card-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: #303133; }
+    .check-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; }
+    .feishu-row {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .field-label { font-size: 12px; color: #606266; margin-bottom: 6px; display: block; }
+    .field-input {
+      width: 100%; border: 1px solid #dcdfe6; border-radius: 6px;
+      padding: 8px 10px; font-size: 13px;
+    }
+    .field-input.error { border-color: #f56c6c; background: #fef0f0; }
+    .field-error {
+      font-size: 12px; color: #f56c6c; margin-top: 6px; display: none;
+    }
+    .field-error.show { display: block; }
+    .help-link { font-size: 12px; color: #409eff; text-decoration: none; }
+    .help-link:hover { text-decoration: underline; }
+    .timing-note {
+      font-size: 12px; color: #909399; margin-top: 14px;
+      padding: 10px; background: #fafafa; border-radius: 6px;
+    }
+    .btn {
+      padding: 8px 18px; border-radius: 8px; font-size: 13px; cursor: pointer;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+    }
+    .btn-primary {
+      background: #409eff; color: #fff; border-color: #409eff;
+    }
+    .btn-primary:disabled {
+      background: #a0cfff; border-color: #a0cfff; cursor: not-allowed;
+    }
+    .btn-ghost { background: transparent; }
+
+    /* 配置页静态对比 */
+    .config-states {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .config-mock {
+      background: #f5f6f8; border: 1px solid #e4e7ed; border-radius: 10px;
+      padding: 14px;
+    }
+    .config-mock .mock-title {
+      font-size: 12px; font-weight: 600; color: #409eff; margin-bottom: 10px;
+    }
+    .config-mock .mini-modal {
+      background: #fff; border-radius: 8px; border: 1px solid #e4e7ed;
+      padding: 12px; font-size: 12px;
+    }
+    .banner-warn {
+      background: #fdf6ec; border: 1px solid #faecd8; color: #e6a23c;
+      padding: 8px 10px; border-radius: 6px; font-size: 12px; margin-bottom: 10px;
+    }
+    .toast {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      background: #303133; color: #fff; padding: 10px 20px; border-radius: 8px;
+      font-size: 13px; z-index: 200; display: none; max-width: 90%;
+    }
+    .toast.show { display: block; }
+    .flow-box {
+      margin-top: 16px; padding: 14px; background: #fff;
+      border: 1px solid #e4e7ed; border-radius: 10px; font-size: 13px;
+    }
+    .flow-box ol { margin-left: 18px; margin-top: 8px; }
+    .flow-box li { margin-bottom: 6px; }
+    details { margin-top: 24px; }
+    summary { cursor: pointer; font-weight: 600; color: #606266; }
+  </style>
+</head>
+<body>
+  <h1>通知 UI 预览（卡片 + 配置页 + Webhook 强制校验）</h1>
+  <p class="page-desc">
+    推荐方案：<strong>主界面方案 A（快捷 Chip）</strong> + <strong>通知配置弹窗</strong>。
+    核心规则：<strong>未填写 Webhook 时，不允许启用飞书通知</strong>（卡片点「飞书」或弹窗勾选飞书并保存都会被拦截）。
+  </p>
+  <p class="open-tip">
+    文件：<code>prototype/pyside6-notify-card-preview.html</code> — 下方「可交互演示」请实际操作。
+  </p>
+
+  <h2>一、可交互演示（推荐方案）</h2>
+  <p class="section-note">
+    左侧为仪表盘通知卡片；右侧为操作日志。可切换「Webhook 是否已配置」，并尝试点击「飞书」或打开配置弹窗。
+  </p>
+
+  <div class="control-bar">
+    <span style="font-size:12px;color:#909399;align-self:center">模拟数据：</span>
+    <button type="button" class="ctrl-btn" id="btnWebhookEmpty">Webhook 未配置</button>
+    <button type="button" class="ctrl-btn active" id="btnWebhookOk">Webhook 已配置</button>
+    <button type="button" class="ctrl-btn" id="btnOpenConfig">打开「通知配置」弹窗</button>
+  </div>
+
+  <div class="demo-layout">
+    <article class="card" id="dashCard">
+      <div class="card-header">
+        <span class="caption">通知</span>
+        <button type="button" class="link-btn" id="btnEditWebhook">编辑 Webhook</button>
+      </div>
+      <label class="master-row">
+        <input type="checkbox" id="masterNotify" checked /> 启用通知
+      </label>
+      <div class="chip-row">
+        <button type="button" class="chip on" id="chipDesktop">本地</button>
+        <button type="button" class="chip on" id="chipFeishu">飞书</button>
+      </div>
+      <p class="status-line" id="dashStatus">
+        <span class="dot ok"></span> Webhook 已配置
+      </p>
+      <button type="button" class="btn btn-primary" style="width:100%;margin-top:12px" id="btnOpenConfig2">
+        通知配置
+      </button>
+    </article>
+
+    <div class="demo-panel">
+      <h3>交互说明 / 日志</h3>
+      <div class="log-area" id="logArea">
+        <div class="info">[提示] 切换「Webhook 未配置」后，再点击「飞书」Chip 查看拦截效果。</div>
+      </div>
+      <div class="flow-box">
+        <strong>拦截规则（拟实现逻辑）</strong>
+        <ol>
+          <li>卡片点击「飞书」且 Webhook 为空 → <strong>不开启</strong> Chip，弹出提示并自动打开配置弹窗</li>
+          <li>配置弹窗勾选「飞书」但 Webhook 为空 → 「保存」按钮禁用，输入框标红</li>
+          <li>仅勾选「本地」可不填 Webhook；保存成功后才更新卡片状态</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
+  <!-- 配置弹窗 -->
+  <div class="modal-backdrop" id="configModal">
+    <div class="modal" role="dialog" aria-labelledby="modalTitle">
+      <div class="modal-header">
+        <h4 id="modalTitle">通知配置</h4>
+        <button type="button" class="modal-close" id="closeModal" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="check-row">
+          <input type="checkbox" id="dlgEnableNotify" checked /> 启用通知
+        </label>
+
+        <div class="dialog-card">
+          <div class="dialog-card-title">通知渠道</div>
+          <a class="help-link" href="https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot" target="_blank" rel="noopener">
+            如何配置飞书自定义机器人 Webhook
+          </a>
+
+          <div class="feishu-row" style="margin-top:12px">
+            <label class="check-row" style="margin:0">
+              <input type="checkbox" id="dlgFeishu" checked /> 飞书
+            </label>
+            <label class="check-row" style="margin:0">
+              <input type="checkbox" id="dlgDesktop" checked /> 本地桌面通知
+            </label>
+          </div>
+
+          <label class="field-label" for="dlgWebhook">Webhook URL <span style="color:#f56c6c">*</span>（启用飞书时必填）</label>
+          <input
+            type="url"
+            class="field-input"
+            id="dlgWebhook"
+            placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+          />
+          <p class="field-error" id="webhookError">启用飞书通知时必须填写 Webhook URL</p>
+        </div>
+
+        <p class="timing-note">
+          当前在<strong>任务完成</strong>与<strong>任务失败</strong>时发送通知（发送时机暂不在此配置）。
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" id="cancelModal">取消</button>
+        <button type="button" class="btn btn-primary" id="saveModal">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <h2>二、配置弹窗 · 静态状态对比</h2>
+  <p class="section-note">以下为配置页在不同场景下的固定示意（无需交互）。</p>
+
+  <div class="config-states">
+    <div class="config-mock">
+      <div class="mock-title">正常：飞书已配置 Webhook</div>
+      <div class="mini-modal">
+        <div class="check-row"><input type="checkbox" checked disabled /> 启用通知</div>
+        <div style="margin-top:8px;padding:8px;border:1px solid #e4e7ed;border-radius:6px">
+          <div style="font-weight:600;margin-bottom:6px">通知渠道</div>
+          <div class="check-row"><input type="checkbox" checked disabled /> 飞书</div>
+          <div class="check-row"><input type="checkbox" checked disabled /> 本地</div>
+          <div style="margin-top:8px;font-size:11px;color:#606266">Webhook URL</div>
+          <div style="padding:6px;background:#f5f7fa;border-radius:4px;margin-top:4px;word-break:break-all">
+            https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+          </div>
+        </div>
+        <div style="text-align:right;margin-top:10px">
+          <span style="color:#409eff;font-size:11px">[ 保存 ] 可点击</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-mock">
+      <div class="mock-title">拦截：勾选飞书但 Webhook 为空</div>
+      <div class="mini-modal">
+        <div class="banner-warn">请先填写 Webhook，才能启用飞书通知</div>
+        <div class="check-row"><input type="checkbox" checked disabled /> 启用通知</div>
+        <div style="margin-top:8px;padding:8px;border:1px solid #f56c6c;border-radius:6px;background:#fef0f0">
+          <div class="check-row"><input type="checkbox" checked disabled /> 飞书</div>
+          <div style="margin-top:6px;font-size:11px;color:#f56c6c">Webhook URL 不能为空</div>
+          <input class="field-input error" disabled placeholder="必填..." style="margin-top:4px" />
+        </div>
+        <div style="text-align:right;margin-top:10px">
+          <span style="color:#a0cfff;font-size:11px">[ 保存 ] 禁用</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-mock">
+      <div class="mock-title">仅本地：无需 Webhook</div>
+      <div class="mini-modal">
+        <div class="check-row"><input type="checkbox" checked disabled /> 启用通知</div>
+        <div style="margin-top:8px;padding:8px;border:1px solid #e4e7ed;border-radius:6px">
+          <div class="check-row"><input type="checkbox" disabled /> 飞书</div>
+          <div class="check-row"><input type="checkbox" checked disabled /> 本地</div>
+          <div style="margin-top:8px;font-size:11px;color:#909399">Webhook 输入框隐藏或禁用</div>
+        </div>
+        <div style="text-align:right;margin-top:10px">
+          <span style="color:#409eff;font-size:11px">[ 保存 ] 可点击</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>三、卡片方案参考（A/B/C/D）</h2>
+  <p class="section-note">若只需看四种主卡片布局，可展开下方折叠区（与上一版相同，供横向对比）。</p>
+  <details>
+    <summary>展开：四种通知卡片方案（点击切换模拟状态）</summary>
+    <div class="state-tabs" id="stateTabs" style="display:flex;gap:8px;margin:16px 0;flex-wrap:wrap">
+      <button type="button" class="ctrl-btn active" data-state="both">本地+飞书</button>
+      <button type="button" class="ctrl-btn" data-state="desktop">仅本地</button>
+      <button type="button" class="ctrl-btn" data-state="feishu-missing">飞书无Webhook</button>
+      <button type="button" class="ctrl-btn" data-state="none">关闭</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px" id="legacyGrid">
+      <!-- filled by script -->
+    </div>
+  </details>
+
+  <script>
+    // —— 全局模拟数据 ——
+    let webhookUrl = "https://open.feishu.cn/open-apis/bot/v2/hook/demo";
+    let notifyEnabled = true;
+    let desktopOn = true;
+    let feishuOn = true;
+
+    const logArea = document.getElementById("logArea");
+    function log(msg, type = "info") {
+      const line = document.createElement("div");
+      line.className = type;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logArea.appendChild(line);
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+    function showToast(msg) {
+      const t = document.getElementById("toast");
+      t.textContent = msg;
+      t.classList.add("show");
+      setTimeout(() => t.classList.remove("show"), 2800);
+    }
+    function hasWebhook() {
+      return webhookUrl.trim().length > 0;
+    }
+
+    function refreshDashCard() {
+      const master = document.getElementById("masterNotify");
+      const chipD = document.getElementById("chipDesktop");
+      const chipF = document.getElementById("chipFeishu");
+      const status = document.getElementById("dashStatus");
+      const editBtn = document.getElementById("btnEditWebhook");
+
+      master.checked = notifyEnabled;
+      chipD.className = "chip" + (notifyEnabled && desktopOn ? " on" : "");
+      chipF.className = "chip" + (notifyEnabled && feishuOn ? " on" : "");
+      chipD.disabled = !notifyEnabled;
+      chipF.disabled = !notifyEnabled;
+      editBtn.style.visibility = notifyEnabled && (feishuOn || !hasWebhook()) ? "visible" : "hidden";
+
+      if (!notifyEnabled) {
+        status.innerHTML = '<span class="dot off"></span> 任务期间不发送通知';
+      } else if (feishuOn && !hasWebhook()) {
+        status.innerHTML = '<span class="dot warn"></span> 飞书已选但未配置 Webhook（无效）';
+      } else if (feishuOn && hasWebhook()) {
+        status.innerHTML = '<span class="dot ok"></span> 本地 + 飞书 · Webhook 已配置';
+      } else if (desktopOn) {
+        status.innerHTML = '<span class="dot ok"></span> 仅本地通知';
+      } else {
+        status.innerHTML = '<span class="dot warn"></span> 请至少选择一种通知方式';
+      }
+    }
+
+    function openConfigModal(focusWebhook = false) {
+      document.getElementById("configModal").classList.add("show");
+      document.getElementById("dlgEnableNotify").checked = notifyEnabled;
+      document.getElementById("dlgFeishu").checked = feishuOn;
+      document.getElementById("dlgDesktop").checked = desktopOn;
+      document.getElementById("dlgWebhook").value = webhookUrl;
+      validateDialog();
+      if (focusWebhook) {
+        setTimeout(() => document.getElementById("dlgWebhook").focus(), 100);
+      }
+    }
+    function closeConfigModal() {
+      document.getElementById("configModal").classList.remove("show");
+    }
+
+    function validateDialog() {
+      const enabled = document.getElementById("dlgEnableNotify").checked;
+      const feishu = document.getElementById("dlgFeishu").checked;
+      const desktop = document.getElementById("dlgDesktop").checked;
+      const url = document.getElementById("dlgWebhook").value.trim();
+      const input = document.getElementById("dlgWebhook");
+      const err = document.getElementById("webhookError");
+      const saveBtn = document.getElementById("saveModal");
+
+      const needWebhook = enabled && feishu;
+      const webhookMissing = needWebhook && !url;
+      const noChannel = enabled && !feishu && !desktop;
+
+      input.classList.toggle("error", webhookMissing);
+      err.classList.toggle("show", webhookMissing);
+      saveBtn.disabled = webhookMissing || noChannel;
+
+      input.disabled = !enabled || !feishu;
+      if (!feishu) input.classList.remove("error");
+    }
+
+    function tryEnableFeishuChip() {
+      if (!hasWebhook()) {
+        document.getElementById("chipFeishu").classList.add("blocked");
+        setTimeout(() => document.getElementById("chipFeishu").classList.remove("blocked"), 400);
+        feishuOn = false;
+        refreshDashCard();
+        log("拦截：未配置 Webhook，无法启用飞书通知", "warn");
+        showToast("请先配置飞书 Webhook");
+        openConfigModal(true);
+        return false;
+      }
+      feishuOn = true;
+      refreshDashCard();
+      log("已启用飞书通知", "ok");
+      return true;
+    }
+
+    // —— 事件绑定 ——
+    document.getElementById("btnWebhookEmpty").addEventListener("click", function () {
+      webhookUrl = "";
+      feishuOn = false;
+      document.getElementById("btnWebhookEmpty").classList.add("active");
+      document.getElementById("btnWebhookOk").classList.remove("active");
+      refreshDashCard();
+      log("模拟：Webhook 已清空", "warn");
+    });
+    document.getElementById("btnWebhookOk").addEventListener("click", function () {
+      webhookUrl = "https://open.feishu.cn/open-apis/bot/v2/hook/demo";
+      document.getElementById("btnWebhookOk").classList.add("active");
+      document.getElementById("btnWebhookEmpty").classList.remove("active");
+      refreshDashCard();
+      log("模拟：Webhook 已配置", "ok");
+    });
+
+    document.getElementById("masterNotify").addEventListener("change", function (e) {
+      notifyEnabled = e.target.checked;
+      if (!notifyEnabled) { desktopOn = false; feishuOn = false; }
+      else if (!desktopOn && !feishuOn) desktopOn = true;
+      refreshDashCard();
+      log(notifyEnabled ? "启用通知" : "关闭通知");
+    });
+    document.getElementById("chipDesktop").addEventListener("click", function () {
+      if (!notifyEnabled || this.disabled) return;
+      desktopOn = !desktopOn;
+      if (!desktopOn && !feishuOn && notifyEnabled) desktopOn = true;
+      refreshDashCard();
+    });
+    document.getElementById("chipFeishu").addEventListener("click", function () {
+      if (!notifyEnabled || this.disabled) return;
+      if (this.classList.contains("on")) {
+        feishuOn = false;
+        refreshDashCard();
+        return;
+      }
+      tryEnableFeishuChip();
+    });
+
+    ["btnOpenConfig", "btnOpenConfig2", "btnEditWebhook"].forEach((id) => {
+      document.getElementById(id).addEventListener("click", () => openConfigModal(!hasWebhook()));
+    });
+    document.getElementById("closeModal").addEventListener("click", closeConfigModal);
+    document.getElementById("cancelModal").addEventListener("click", closeConfigModal);
+    document.getElementById("configModal").addEventListener("click", function (e) {
+      if (e.target === this) closeConfigModal();
+    });
+
+    ["dlgEnableNotify", "dlgFeishu", "dlgDesktop", "dlgWebhook"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", validateDialog);
+      document.getElementById(id).addEventListener("change", validateDialog);
+    });
+    document.getElementById("dlgFeishu").addEventListener("change", function (e) {
+      if (e.target.checked && !document.getElementById("dlgWebhook").value.trim()) {
+        log("弹窗：勾选飞书但 Webhook 为空，保存已禁用", "warn");
+      }
+    });
+
+    document.getElementById("saveModal").addEventListener("click", function () {
+      if (this.disabled) return;
+      notifyEnabled = document.getElementById("dlgEnableNotify").checked;
+      feishuOn = document.getElementById("dlgFeishu").checked;
+      desktopOn = document.getElementById("dlgDesktop").checked;
+      webhookUrl = document.getElementById("dlgWebhook").value.trim();
+      if (notifyEnabled && feishuOn && !hasWebhook()) {
+        showToast("启用飞书时必须填写 Webhook");
+        return;
+      }
+      if (notifyEnabled && !feishuOn && !desktopOn) {
+        showToast("请至少选择一种通知渠道");
+        return;
+      }
+      closeConfigModal();
+      refreshDashCard();
+      log("配置已保存", "ok");
+      showToast("通知配置已保存");
+    });
+
+    // —— 旧版四方案（折叠区内）——
+    const legacyStates = {
+      both: { master: true, desktop: true, feishu: true, webhook: true },
+      desktop: { master: true, desktop: true, feishu: false, webhook: false },
+      "feishu-missing": { master: true, desktop: false, feishu: true, webhook: false },
+      none: { master: false, desktop: false, feishu: false, webhook: false },
+    };
+    function renderLegacy(state) {
+      const s = legacyStates[state];
+      const grid = document.getElementById("legacyGrid");
+      grid.innerHTML = `
+        <div class="card"><div class="caption">方案 A</div>
+          <div class="chip-row" style="margin-top:8px">
+            <span class="chip ${s.master && s.desktop ? "on" : ""}">本地</span>
+            <span class="chip ${s.master && s.feishu ? "on" : ""}">飞书</span>
+          </div>
+          <p class="status-line" style="margin-top:8px">${s.feishu && !s.webhook ? "需配置 Webhook" : "—"}</p>
+        </div>
+        <div class="card"><div class="caption">方案 B</div>
+          <p style="margin-top:8px;font-weight:600">${s.master ? (s.feishu && s.webhook ? "本地+飞书" : "仅本地") : "关闭"}</p>
+          <button class="btn-config primary" style="margin-top:8px">修改配置</button>
+        </div>
+      `;
+    }
+    document.getElementById("stateTabs")?.addEventListener("click", (e) => {
+      const tab = e.target.closest("[data-state]");
+      if (!tab) return;
+      document.querySelectorAll("#stateTabs .ctrl-btn").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      renderLegacy(tab.dataset.state);
+    });
+    renderLegacy("both");
+    refreshDashCard();
+    log("演示就绪。请先试：Webhook 未配置 → 点击飞书 Chip。", "info");
+  </script>
+</body>
+</html>

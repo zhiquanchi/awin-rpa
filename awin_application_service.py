@@ -25,7 +25,7 @@ from app_interfaces import (
 )
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
-from main import AwinRPA, CLICKED_IDS_PATH, _load_id_set
+from main import AwinRPA, CLICKED_IDS_PATH, _is_tcp_port_open, _load_id_set
 from remote_sync_service import RemoteSyncService, get_machine_uid
 
 
@@ -226,15 +226,13 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """连接浏览器并返回更新后的运行态。"""
         with self._lock:
             self._ensure_bootstrapped()
-            templates = self._load_templates()
-            active_index = self.settings_repository.active_template_index
-            if active_index < 0 or active_index >= len(templates):
-                raise ValueError("请先激活一个模板。")
 
-            if self._rpa is not None:
+            if self._rpa is not None and self._is_browser_session_alive():
                 self._status_text = "浏览器已连接，等待执行..."
                 self._connection_error = None
                 return self._build_state()
+
+            self._rpa = None
 
             try:
                 self._rpa = self._rpa_factory(
@@ -249,6 +247,15 @@ class AwinApplicationService(ApplicationServiceProtocol):
             self._connection_error = None
             self._status_text = "浏览器已连接，等待执行..."
             return self._build_state()
+
+    def _is_browser_session_alive(self) -> bool:
+        """判断当前 RPA 会话对应的调试端口是否仍可用。"""
+        if self._rpa is None:
+            return False
+        try:
+            return _is_tcp_port_open(self._rpa.browser_host, self._rpa.browser_port)
+        except Exception:
+            return False
 
     def reset_clicked_ids(self) -> tuple[int, AppRuntimeStateViewModel]:
         """重置已点击记录，并返回清理数量和运行态。"""

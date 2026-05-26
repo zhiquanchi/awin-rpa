@@ -622,12 +622,6 @@ class TemplateManagerApp(App):
 
     def action_connect_browser(self) -> None:
         """连接浏览器"""
-        # 检查是否有激活的模板
-        active_index = self.config_manager.active_template_index
-        if active_index < 0 or active_index >= len(self.templates):
-            self.notify("请先激活一个模板", severity="warning")
-            return
-
         if self.app_service.get_state().connection.browser_connected:
             self.notify("浏览器已连接", severity="warning")
             return

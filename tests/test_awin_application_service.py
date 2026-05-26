@@ -163,6 +163,30 @@ def test_connect_execute_and_reset_flow(local_paths: tuple[Path, Path]) -> None:
     assert reset_state.connection.clicked_records_count == 0
 
 
+def test_connect_browser_does_not_require_active_template(
+    local_paths: tuple[Path, Path],
+) -> None:
+    """连接浏览器不应依赖已激活模板。"""
+    config_path, template_path = local_paths
+    repository = JsonTemplateRepository(file_path=template_path)
+    repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
+    settings = ConfigManager(config_path=config_path)
+    settings.active_template_index = -1
+    fake_sync_service = FakeSyncService()
+    fake_rpa = FakeRpaRunner(None, None)
+    service = AwinApplicationService(
+        template_repository=repository,
+        settings_factory=lambda: ConfigManager(config_path=config_path),
+        sync_service_factory=lambda _url, _uid: fake_sync_service,
+        rpa_factory=lambda notify_channel, webhook: fake_rpa,
+    )
+    service.bootstrap()
+
+    connected_state = service.connect_browser()
+
+    assert connected_state.connection.browser_connected is True
+
+
 @pytest.mark.parametrize(
     "operation",
     [
