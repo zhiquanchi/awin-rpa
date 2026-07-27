@@ -6,7 +6,6 @@ from typing import Any, Callable, Literal, Protocol, Sequence, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 NotifyChannel = Literal["desktop", "feishu", "both", "none"]
-SyncConfigKind = Literal["tui_config", "invitation_messages"]
 LogLevel = Literal["info", "success", "warning", "error"]
 
 
@@ -55,7 +54,7 @@ class InvitationTemplate(BaseModel):
 
 
 class AppSettings(BaseModel):
-    """Validated shared settings used by the CLI, TUI, and sync layer."""
+    """Validated shared settings used by the CLI and TUI."""
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -64,7 +63,6 @@ class AppSettings(BaseModel):
     active_template_index: int = Field(default=-1, ge=-1)
     notify_channel: NotifyChannel = "desktop"
     feishu_webhook_url: str = ""
-    sync_url: str = "http://localhost:8080"
 
     @field_validator("notify_channel", mode="before")
     @classmethod
@@ -81,23 +79,9 @@ class AppSettings(BaseModel):
         """Normalize nullable webhook values to trimmed strings."""
         return str(value or "").strip()
 
-    @field_validator("sync_url", mode="before")
-    @classmethod
-    def normalize_sync_url(cls, value: Any) -> str:
-        """Normalize the sync URL and preserve a non-empty default."""
-        normalized = str(value or "").strip()
-        return normalized or "http://localhost:8080"
-
     def to_storage_payload(self) -> dict[str, Any]:
         """Return the JSON-serializable settings payload."""
         return self.model_dump(mode="json")
-
-
-class PulledConfigBundle(BaseModel):
-    """Structured data returned from the remote sync service."""
-
-    settings: AppSettings | None = None
-    templates: list[InvitationTemplate] | None = None
 
 
 class TemplatePanelViewModel(BaseModel):
@@ -118,7 +102,6 @@ class SettingsViewModel(BaseModel):
     send_count: int = Field(default=10, ge=1)
     notify_channel: NotifyChannel = "desktop"
     feishu_webhook_url: str = ""
-    sync_url: str = "http://localhost:8080"
 
 
 class BrowserConnectionViewModel(BaseModel):
@@ -201,14 +184,6 @@ class SettingsRepositoryProtocol(Protocol):
         """Return the on-disk settings path."""
 
     @property
-    def sync_url(self) -> str:
-        """Return the configured sync URL."""
-
-    @sync_url.setter
-    def sync_url(self, value: str) -> None:
-        """Persist a new sync URL."""
-
-    @property
     def send_count(self) -> int:
         """Return the configured send count."""
 
@@ -262,7 +237,7 @@ class SettingsRepositoryProtocol(Protocol):
         """Return a defensive copy of the current settings."""
 
     def to_sync_payload(self) -> dict[str, Any]:
-        """Return the payload used by remote sync."""
+        """Return the payload used by local persistence."""
 
 
 @runtime_checkable
@@ -285,22 +260,7 @@ class TemplateRepositoryProtocol(Protocol):
     def to_sync_payload(
         self, templates: Sequence[InvitationTemplate]
     ) -> list[dict[str, str]]:
-        """Convert validated templates to the sync payload format."""
-
-
-@runtime_checkable
-class SyncServiceProtocol(Protocol):
-    """Contract for remote configuration synchronization."""
-
-    def pull_configs(self) -> PulledConfigBundle | None:
-        """Pull the latest synced settings and templates from the server."""
-
-    def push_config(
-        self,
-        kind: SyncConfigKind,
-        data: dict[str, Any] | list[dict[str, Any]],
-    ) -> None:
-        """Push one configuration payload to the remote sync service."""
+        """Convert validated templates to the storage payload format."""
 
 
 @runtime_checkable
@@ -334,9 +294,6 @@ class ApplicationServiceProtocol(Protocol):
 
     def bootstrap(self) -> AppRuntimeStateViewModel:
         """初始化应用依赖并返回首个运行态。"""
-
-    def refresh_from_remote(self) -> AppRuntimeStateViewModel:
-        """重新从远端拉取配置并返回当前运行态。"""
 
     def get_state(self) -> AppRuntimeStateViewModel:
         """读取当前运行态。"""

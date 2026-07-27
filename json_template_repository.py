@@ -7,6 +7,7 @@ from typing import Any, Sequence
 from loguru import logger
 
 from app_interfaces import InvitationTemplate
+from config_manager import _migrate_if_needed, get_user_config_dir
 
 DEFAULT_TEMPLATE_NAME = "默认模板"
 DEFAULT_TEMPLATE_CONTENT = "请输入模板内容..."
@@ -16,7 +17,12 @@ class JsonTemplateRepository:
     """Persist invitation templates in the repository's JSON storage file."""
 
     def __init__(self, file_path: Path | None = None) -> None:
-        self.file_path = file_path or Path(__file__).parent / "invitation_messages.json"
+        if file_path is None:
+            default_path = get_user_config_dir() / "invitation_messages.json"
+            legacy_path = Path(__file__).parent / "invitation_messages.json"
+            _migrate_if_needed(default_path, legacy_path)
+            file_path = default_path
+        self.file_path = file_path
 
     def load_templates(self) -> list[InvitationTemplate]:
         """Load validated templates from the JSON storage file."""
@@ -45,6 +51,7 @@ class JsonTemplateRepository:
     def save_templates(self, templates: Sequence[InvitationTemplate]) -> None:
         """Save templates to disk using the repository JSON format."""
         payload = self.to_sync_payload(templates)
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.file_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
 
@@ -67,5 +74,5 @@ class JsonTemplateRepository:
     def to_sync_payload(
         self, templates: Sequence[InvitationTemplate]
     ) -> list[dict[str, str]]:
-        """Convert validated templates into the remote sync payload shape."""
+        """Convert validated templates into the storage payload format."""
         return [template.to_storage_record() for template in templates]

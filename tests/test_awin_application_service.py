@@ -4,26 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from app_interfaces import AppSettings, InvitationTemplate, PulledConfigBundle
+from app_interfaces import AppSettings, InvitationTemplate
 from awin_application_service import AwinApplicationService
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
-
-
-class FakeSyncService:
-    """测试用同步服务。"""
-
-    def __init__(self, pulled_bundle: PulledConfigBundle | None = None) -> None:
-        self.pulled_bundle = pulled_bundle
-        self.push_calls: list[tuple[str, object]] = []
-
-    def pull_configs(self) -> PulledConfigBundle | None:
-        """返回预设的拉取结果。"""
-        return self.pulled_bundle
-
-    def push_config(self, kind: str, data: object) -> None:
-        """记录推送调用。"""
-        self.push_calls.append((kind, data))
 
 
 class FakeRpaRunner:
@@ -73,32 +57,18 @@ def local_paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "tui_config.json", tmp_path / "invitation_messages.json"
 
 
-def test_bootstrap_applies_remote_bundle(local_paths: tuple[Path, Path]) -> None:
-    """bootstrap 应应用远端配置与模板。"""
+def test_bootstrap_creates_default_templates(local_paths: tuple[Path, Path]) -> None:
+    """bootstrap 应创建默认模板。"""
     config_path, template_path = local_paths
-    pulled_bundle = PulledConfigBundle(
-        settings=AppSettings(
-            send_count=5,
-            active_template_index=0,
-            notify_channel="both",
-            feishu_webhook_url="https://example.com/hook",
-            sync_url="https://sync.example.com",
-        ),
-        templates=[InvitationTemplate(id=1, name="远端模板", content="远端内容")],
-    )
-    fake_sync_service = FakeSyncService(pulled_bundle=pulled_bundle)
     service = AwinApplicationService(
         template_repository=JsonTemplateRepository(file_path=template_path),
         settings_factory=lambda: ConfigManager(config_path=config_path),
-        sync_service_factory=lambda _url, _uid: fake_sync_service,
     )
 
     state = service.bootstrap()
 
-    assert state.settings.send_count == 5
-    assert state.templates.selected_template_id == 1
-    assert state.templates.active_template_id == 1
-    assert state.templates.templates[0].name == "远端模板"
+    assert len(state.templates.templates) == 1
+    assert state.templates.templates[0].name == "默认模板"
 
 
 def test_delete_template_repairs_active_index(local_paths: tuple[Path, Path]) -> None:
@@ -114,11 +84,9 @@ def test_delete_template_repairs_active_index(local_paths: tuple[Path, Path]) ->
     )
     settings = ConfigManager(config_path=config_path)
     settings.active_template_index = 2
-    fake_sync_service = FakeSyncService()
     service = AwinApplicationService(
         template_repository=repository,
         settings_factory=lambda: ConfigManager(config_path=config_path),
-        sync_service_factory=lambda _url, _uid: fake_sync_service,
     )
     service.bootstrap()
 
@@ -136,13 +104,11 @@ def test_connect_execute_and_reset_flow(local_paths: tuple[Path, Path]) -> None:
     settings = ConfigManager(config_path=config_path)
     settings.active_template_index = 0
     settings.send_count = 1
-    fake_sync_service = FakeSyncService()
     fake_rpa = FakeRpaRunner(None, None)
     log_messages: list[str] = []
     service = AwinApplicationService(
         template_repository=repository,
         settings_factory=lambda: ConfigManager(config_path=config_path),
-        sync_service_factory=lambda _url, _uid: fake_sync_service,
         rpa_factory=lambda notify_channel, webhook: fake_rpa,
     )
     service.bootstrap()
@@ -172,12 +138,10 @@ def test_connect_browser_does_not_require_active_template(
     repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
     settings = ConfigManager(config_path=config_path)
     settings.active_template_index = -1
-    fake_sync_service = FakeSyncService()
     fake_rpa = FakeRpaRunner(None, None)
     service = AwinApplicationService(
         template_repository=repository,
         settings_factory=lambda: ConfigManager(config_path=config_path),
-        sync_service_factory=lambda _url, _uid: fake_sync_service,
         rpa_factory=lambda notify_channel, webhook: fake_rpa,
     )
     service.bootstrap()
@@ -195,7 +159,6 @@ def test_connect_browser_does_not_require_active_template(
         lambda service: service.delete_template(1),
         lambda service: service.activate_template(1),
         lambda service: service.select_template(1),
-        lambda service: service.refresh_from_remote(),
     ],
 )
 def test_template_mutation_is_blocked_while_running(
@@ -207,11 +170,9 @@ def test_template_mutation_is_blocked_while_running(
     repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
     settings = ConfigManager(config_path=config_path)
     settings.active_template_index = 0
-    fake_sync_service = FakeSyncService()
     service = AwinApplicationService(
         template_repository=repository,
         settings_factory=lambda: ConfigManager(config_path=config_path),
-        sync_service_factory=lambda _url, _uid: fake_sync_service,
     )
     service.bootstrap()
     service._execution_state.is_running = True

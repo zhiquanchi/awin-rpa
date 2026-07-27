@@ -69,18 +69,25 @@ from rich.console import Console
 from rich.panel import Panel
 
 from app_interfaces import InvitationTemplate
-from config_manager import ConfigManager
+from config_manager import ConfigManager, _migrate_if_needed, get_user_config_dir
 from json_template_repository import JsonTemplateRepository
 
 console = Console()
 logger.add("file.log")
 
 
-AUDIT_LOG_PATH = Path(__file__).parent / "awin_audit.jsonl"
-SEEN_IDS_PATH = Path(__file__).parent / "seen_publisher_ids.txt"
-CLICKED_IDS_PATH = Path(__file__).parent / "clicked_publisher_ids.txt"
-FEISHU_WEBHOOK_PATH = Path(__file__).parent / "feishu_webhook.txt"
-DAILY_STATS_PATH = Path(__file__).parent / "awin_daily_stats.json"
+_USER_CONFIG_DIR = get_user_config_dir()
+AUDIT_LOG_PATH = _USER_CONFIG_DIR / "awin_audit.jsonl"
+SEEN_IDS_PATH = _USER_CONFIG_DIR / "seen_publisher_ids.txt"
+CLICKED_IDS_PATH = _USER_CONFIG_DIR / "clicked_publisher_ids.txt"
+FEISHU_WEBHOOK_PATH = _USER_CONFIG_DIR / "feishu_webhook.txt"
+DAILY_STATS_PATH = _USER_CONFIG_DIR / "awin_daily_stats.json"
+
+_migrate_if_needed(AUDIT_LOG_PATH, Path(__file__).parent / "awin_audit.jsonl")
+_migrate_if_needed(SEEN_IDS_PATH, Path(__file__).parent / "seen_publisher_ids.txt")
+_migrate_if_needed(CLICKED_IDS_PATH, Path(__file__).parent / "clicked_publisher_ids.txt")
+_migrate_if_needed(FEISHU_WEBHOOK_PATH, Path(__file__).parent / "feishu_webhook.txt")
+_migrate_if_needed(DAILY_STATS_PATH, Path(__file__).parent / "awin_daily_stats.json")
 BROWSER_DEBUG_HOST = (
     os.getenv("AWIN_BROWSER_DEBUG_HOST", "127.0.0.1") or "127.0.0.1"
 ).strip()
@@ -414,7 +421,11 @@ class Updater:
         "main.py",
         "tui_app.py",
         "tui_app.tcss",
+        "pyside6_app.py",
         "config_manager.py",
+        "app_interfaces.py",
+        "awin_application_service.py",
+        "json_template_repository.py",
         "pyproject.toml",
     ]
     TIMEOUT = 15  # 网络请求超时（秒）
@@ -1950,6 +1961,5 @@ class AppUI:
 
 
 if __name__ == "__main__":
-    rpa = AwinRPA()
-    app = AppUI(rpa)
-    app.start()
+    from pyside6_app import main as pyside6_main
+    raise SystemExit(pyside6_main())

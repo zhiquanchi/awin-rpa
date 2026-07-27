@@ -16,7 +16,6 @@ def test_invalid_config_falls_back_to_defaults(tmp_path: Path) -> None:
 
     assert manager.send_count == 10
     assert manager.notify_channel == "desktop"
-    assert manager.sync_url == "http://localhost:8080"
 
 
 def test_replace_persists_validated_settings(tmp_path: Path) -> None:
@@ -31,7 +30,6 @@ def test_replace_persists_validated_settings(tmp_path: Path) -> None:
             active_template_index=0,
             notify_channel="both",
             feishu_webhook_url="https://example.com/hook",
-            sync_url="https://sync.example.com",
         )
     )
 

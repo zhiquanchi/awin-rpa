@@ -29,14 +29,12 @@ from app_interfaces import (
     AppRuntimeStateViewModel,
     InvitationTemplate,
     SettingsRepositoryProtocol,
-    SyncServiceProtocol,
     TemplateRepositoryProtocol,
 )
 from awin_application_service import AwinApplicationService
 from main import Updater
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
-from remote_sync_service import RemoteSyncService, get_machine_uid
 from loguru import logger
 
 
@@ -172,27 +170,17 @@ class TemplateManagerApp(App):
         self,
         template_repository: TemplateRepositoryProtocol | None = None,
         config_manager_factory: Callable[[], SettingsRepositoryProtocol] | None = None,
-        sync_service_factory: (
-            Callable[[str, str], SyncServiceProtocol] | None
-        ) = None,
-        uid_provider: Callable[[], str] | None = None,
     ) -> None:
         super().__init__()
 
         config_factory = config_manager_factory or ConfigManager
-        sync_factory = sync_service_factory or RemoteSyncService
-        uid_factory = uid_provider or get_machine_uid
         self.template_repository = template_repository or JsonTemplateRepository()
         self.app_service = AwinApplicationService(
             template_repository=self.template_repository,
             settings_factory=config_factory,
-            sync_service_factory=sync_factory,
-            uid_provider=uid_factory,
         )
         runtime_state = self.app_service.bootstrap()
         self.config_manager = self.app_service.settings_repository
-        self.sync_service = self.app_service.sync_service
-        self.uid = self.app_service.uid
         self.templates: list[InvitationTemplate] = runtime_state.templates.templates
         self.send_count = runtime_state.settings.send_count
         self.notify_channel: str = runtime_state.settings.notify_channel
@@ -212,14 +200,6 @@ class TemplateManagerApp(App):
     def _save_templates(self) -> None:
         """保存模板到配置文件"""
         self.template_repository.save_templates(self.templates)
-        self.sync_service.push_config(
-            "invitation_messages",
-            self.template_repository.to_sync_payload(self.templates),
-        )
-
-    def _sync_settings(self) -> None:
-        """同步当前配置到远端。"""
-        self.sync_service.push_config("tui_config", self.config_manager.to_sync_payload())
 
     def _apply_service_state(self, state: AppRuntimeStateViewModel) -> None:
         """把应用服务状态同步回当前 TUI。"""
@@ -700,8 +680,6 @@ class TemplateManagerApp(App):
         
         # 保存到配置
         self.config_manager.active_template_index = index
-        # 同步到云端
-        self._sync_settings()
         
         # 刷新列表以显示激活标记
         self._refresh_template_list()
@@ -856,9 +834,6 @@ class TemplateManagerApp(App):
         self.query_one("#btn-save-count").add_class("hidden")
         self.query_one("#btn-cancel-count").add_class("hidden")
 
-        # 同步到云端
-        self._sync_settings()
-
         self._add_log("success", f"发送数量已更新为 {self.send_count} 个（已保存）")
 
     def _cancel_count_edit(self) -> None:
@@ -951,9 +926,6 @@ class TemplateManagerApp(App):
         self.query_one("#feishu-webhook-display").remove_class("hidden")
         self.query_one("#feishu-webhook-input").add_class("hidden")
         self.is_notify_editing = False
-
-        # 同步到云端
-        self._sync_settings()
 
         self._add_log(
             "success",
@@ -1082,4 +1054,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from pyside6_app import main as pyside6_main
+    raise SystemExit(pyside6_main())

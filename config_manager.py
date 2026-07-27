@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -8,12 +10,44 @@ from loguru import logger
 
 from app_interfaces import AppSettings, NotifyChannel
 
+APP_CONFIG_DIR_NAME = "AwinRPA"
+
+
+def get_user_config_dir() -> Path:
+    """获取用户配置文件夹路径（Windows: %APPDATA%\\AwinRPA）。"""
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        base_dir = Path(appdata)
+    else:
+        base_dir = Path.home() / "AppData" / "Roaming"
+    config_dir = base_dir / APP_CONFIG_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def _migrate_if_needed(new_path: Path, old_path: Path) -> None:
+    """如果旧配置文件存在但新配置文件不存在，则迁移到新位置。"""
+    if new_path.exists():
+        return
+    if not old_path.exists():
+        return
+    try:
+        shutil.copy2(old_path, new_path)
+        logger.info(f"已将配置从 {old_path} 迁移到 {new_path}")
+    except OSError as error:
+        logger.warning(f"迁移配置失败 ({old_path} -> {new_path}): {error}")
+
 
 class ConfigManager:
     """共享配置管理器，负责持久化 CLI 与 TUI 共用的设置。"""
 
     def __init__(self, config_path: Path | None = None) -> None:
-        self.config_path = config_path or Path(__file__).parent / "tui_config.json"
+        if config_path is None:
+            default_path = get_user_config_dir() / "tui_config.json"
+            legacy_path = Path(__file__).parent / "tui_config.json"
+            _migrate_if_needed(default_path, legacy_path)
+            config_path = default_path
+        self.config_path = config_path
         self._settings = self._load()
 
     def _load(self) -> AppSettings:
@@ -42,6 +76,7 @@ class ConfigManager:
 
     def save(self) -> None:
         """Persist the current settings snapshot to disk."""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as file:
             json.dump(self.to_sync_payload(), file, ensure_ascii=False, indent=2)
 
@@ -55,18 +90,8 @@ class ConfigManager:
         return self._settings.model_copy(deep=True)
 
     def to_sync_payload(self) -> dict[str, Any]:
-        """Return the JSON payload used for local persistence and remote sync."""
+        """Return the JSON payload used for local persistence."""
         return self._settings.to_storage_payload()
-
-    @property
-    def sync_url(self) -> str:
-        """Return the configured sync URL."""
-        return self._settings.sync_url
-
-    @sync_url.setter
-    def sync_url(self, value: str) -> None:
-        """Persist a new sync URL."""
-        self._update(sync_url=value)
 
     @property
     def send_count(self) -> int:
@@ -80,7 +105,7 @@ class ConfigManager:
 
     @property
     def selected_template_index(self) -> int:
-        """Return the currently selected template index."""
+        """Return the selected template index."""
         return self._settings.selected_template_index
 
     @selected_template_index.setter
@@ -90,7 +115,7 @@ class ConfigManager:
 
     @property
     def active_template_index(self) -> int:
-        """Return the active template index, or -1 when none is active."""
+        """Return the active template index."""
         return self._settings.active_template_index
 
     @active_template_index.setter

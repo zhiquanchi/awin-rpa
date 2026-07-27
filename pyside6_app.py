@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -1075,22 +1074,7 @@ class MainWindow(QMainWindow):
             self._show_error(str(error))
 
     def _on_settings_menu(self) -> None:
-        menu = QMenu(self)
-        sync_action = menu.addAction("重新同步远端配置")
-        chosen = menu.exec(self.settings_button.mapToGlobal(
-            self.settings_button.rect().bottomLeft()
-        ))
-        if chosen == sync_action:
-            self._on_sync_remote_clicked()
-
-    def _on_sync_remote_clicked(self) -> None:
-        try:
-            state = self.service.refresh_from_remote()
-        except Exception as error:
-            self._show_error(str(error))
-            return
-        self._apply_state(state)
-        self._append_log("info", "已重新同步远端配置")
+        self._on_open_notify_config()
 
     def _on_manage_templates(self) -> None:
         if self._runtime_state.execution.is_running:

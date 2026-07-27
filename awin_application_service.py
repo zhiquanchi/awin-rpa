@@ -16,11 +16,9 @@ from app_interfaces import (
     ExecutionStateViewModel,
     InvitationTemplate,
     NotifyChannel,
-    PulledConfigBundle,
     RpaRunnerProtocol,
     SettingsRepositoryProtocol,
     SettingsViewModel,
-    SyncServiceProtocol,
     TemplatePanelViewModel,
     TemplateRepositoryProtocol,
 )
@@ -34,26 +32,21 @@ from main import (
     _load_daily_stats,
     _save_daily_stats,
 )
-from remote_sync_service import RemoteSyncService, get_machine_uid
 
 
 class AwinApplicationService(ApplicationServiceProtocol):
-    """共享应用服务，负责聚合配置、模板、同步与 RPA 执行逻辑。"""
+    """共享应用服务，负责聚合配置、模板与 RPA 执行逻辑。"""
 
     def __init__(
         self,
         template_repository: TemplateRepositoryProtocol | None = None,
         settings_factory: Callable[[], SettingsRepositoryProtocol] | None = None,
-        sync_service_factory: Callable[[str, str], SyncServiceProtocol] | None = None,
-        uid_provider: Callable[[], str] | None = None,
         rpa_factory: Callable[[str | None, str | None], RpaRunnerProtocol] | None = None,
         clicked_ids_path: Path = CLICKED_IDS_PATH,
         clicked_ids_loader: Callable[[Path], set[str]] = _load_id_set,
     ) -> None:
         self.template_repository = template_repository or JsonTemplateRepository()
         self._settings_factory = settings_factory or ConfigManager
-        self._sync_service_factory = sync_service_factory or RemoteSyncService
-        self._uid_provider = uid_provider or get_machine_uid
         self._rpa_factory = rpa_factory or AwinRPA
         self._clicked_ids_path = clicked_ids_path
         self._clicked_ids_loader = clicked_ids_loader
@@ -65,26 +58,12 @@ class AwinApplicationService(ApplicationServiceProtocol):
         self._connection_error: str | None = None
         self._status_text = "未连接浏览器"
         self.settings_repository = self._settings_factory()
-        self.uid = self._uid_provider()
-        self.sync_service = self._sync_service_factory(
-            self.settings_repository.sync_url, self.uid
-        )
 
     def bootstrap(self) -> AppRuntimeStateViewModel:
-        """初始化仓储与同步服务，并返回首个运行态。"""
+        """初始化仓储并返回首个运行态。"""
         with self._lock:
             self._initialize_runtime()
             self._bootstrapped = True
-            return self._build_state()
-
-    def refresh_from_remote(self) -> AppRuntimeStateViewModel:
-        """重新从远端拉取配置并刷新本地运行态。"""
-        with self._lock:
-            self._ensure_bootstrapped()
-            self._ensure_template_mutation_allowed()
-            pulled_bundle = self.sync_service.pull_configs()
-            self._apply_pulled_bundle(pulled_bundle)
-            self.settings_repository = self._settings_factory()
             return self._build_state()
 
     def get_state(self) -> AppRuntimeStateViewModel:
@@ -195,7 +174,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
             for index, template in enumerate(templates):
                 if template.id == template_id:
                     self.settings_repository.active_template_index = index
-                    self._sync_settings()
                     self._selected_template_id = template_id
                     return self._build_state()
             raise ValueError("模板不存在，无法激活。")
@@ -210,7 +188,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 raise ValueError("发送数量必须是整数。") from error
 
             self.settings_repository.send_count = max(1, send_count)
-            self._sync_settings()
             return self._build_state()
 
     def set_notify_settings(
@@ -227,7 +204,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
 
             self.settings_repository.notify_channel = normalized_channel
             self.settings_repository.feishu_webhook_url = normalized_webhook
-            self._sync_settings()
             return self._build_state()
 
     def connect_browser(self) -> AppRuntimeStateViewModel:
@@ -449,12 +425,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
     def _initialize_runtime(self) -> None:
         """初始化运行时依赖。"""
         self.settings_repository = self._settings_factory()
-        self.uid = self._uid_provider()
-        self.sync_service = self._sync_service_factory(
-            self.settings_repository.sync_url, self.uid
-        )
-        self._apply_pulled_bundle(self.sync_service.pull_configs())
-        self.settings_repository = self._settings_factory()
         templates = self._load_templates()
         active_id = self._get_active_template_id(templates)
         self._selected_template_id = active_id or (
@@ -475,32 +445,13 @@ class AwinApplicationService(ApplicationServiceProtocol):
         if self._execution_state.is_running:
             raise ValueError("执行期间不允许修改模板。")
 
-    def _apply_pulled_bundle(self, pulled_bundle: PulledConfigBundle | None) -> None:
-        """把远端拉取结果应用到本地存储。"""
-        if pulled_bundle is None:
-            return
-
-        if pulled_bundle.settings is not None:
-            self.settings_repository.replace(pulled_bundle.settings)
-
-        if pulled_bundle.templates is not None:
-            self.template_repository.save_templates(pulled_bundle.templates)
-
     def _load_templates(self) -> list[InvitationTemplate]:
         """读取当前模板列表。"""
         return self.template_repository.ensure_default_templates()
 
     def _save_templates(self, templates: list[InvitationTemplate]) -> None:
-        """保存模板并同步到远端。"""
+        """保存模板到本地存储。"""
         self.template_repository.save_templates(templates)
-        self.sync_service.push_config(
-            "invitation_messages",
-            self.template_repository.to_sync_payload(templates),
-        )
-
-    def _sync_settings(self) -> None:
-        """同步当前设置到远端。"""
-        self.sync_service.push_config("tui_config", self.settings_repository.to_sync_payload())
 
     def _normalize_notify_channel(self, channel: NotifyChannel | str) -> NotifyChannel:
         """规范化通知渠道。"""
@@ -526,18 +477,15 @@ class AwinApplicationService(ApplicationServiceProtocol):
         """在模板变更后修复激活索引。"""
         if not templates:
             self.settings_repository.active_template_index = -1
-            self._sync_settings()
             return
 
         if previous_active_template_id is not None:
             for index, template in enumerate(templates):
                 if template.id == previous_active_template_id:
                     self.settings_repository.active_template_index = index
-                    self._sync_settings()
                     return
 
         self.settings_repository.active_template_index = 0
-        self._sync_settings()
 
     def _resolve_template(self, template_id: int | None) -> InvitationTemplate:
         """解析当前要执行的模板。"""
@@ -587,7 +535,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 send_count=settings_snapshot.send_count,
                 notify_channel=settings_snapshot.notify_channel,
                 feishu_webhook_url=settings_snapshot.feishu_webhook_url,
-                sync_url=settings_snapshot.sync_url,
             ),
             connection=BrowserConnectionViewModel(
                 browser_connected=self._rpa is not None,
