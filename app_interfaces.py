@@ -132,6 +132,16 @@ class BrowserConnectionViewModel(BaseModel):
     last_error: str | None = None
 
 
+class DailyStatsViewModel(BaseModel):
+    """每日统计视图模型。"""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    date: str = ""  # YYYY-MM-DD
+    success_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+
+
 class ExecutionStateViewModel(BaseModel):
     """执行状态视图模型。"""
 
@@ -141,6 +151,7 @@ class ExecutionStateViewModel(BaseModel):
     current_template_id: int | None = None
     current_template_name: str = ""
     sent_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
     target_count: int = Field(default=0, ge=0)
     last_message: str = ""
     last_error: str | None = None
@@ -162,6 +173,7 @@ class ExecutionResultViewModel(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     sent_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
     target_count: int = Field(default=0, ge=0)
     stopped: bool = False
     completed: bool = False
@@ -177,6 +189,7 @@ class AppRuntimeStateViewModel(BaseModel):
     settings: SettingsViewModel
     connection: BrowserConnectionViewModel
     execution: ExecutionStateViewModel
+    daily_stats: DailyStatsViewModel = Field(default_factory=DailyStatsViewModel)
 
 
 @runtime_checkable

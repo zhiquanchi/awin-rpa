@@ -10,6 +10,7 @@ from app_interfaces import (
     ApplicationServiceProtocol,
     AppSettings,
     BrowserConnectionViewModel,
+    DailyStatsViewModel,
     ExecutionLogEntryViewModel,
     ExecutionResultViewModel,
     ExecutionStateViewModel,
@@ -25,7 +26,14 @@ from app_interfaces import (
 )
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
-from main import AwinRPA, CLICKED_IDS_PATH, _is_tcp_port_open, _load_id_set
+from main import (
+    AwinRPA,
+    CLICKED_IDS_PATH,
+    _is_tcp_port_open,
+    _load_id_set,
+    _load_daily_stats,
+    _save_daily_stats,
+)
 from remote_sync_service import RemoteSyncService, get_machine_uid
 
 
@@ -306,6 +314,8 @@ class AwinApplicationService(ApplicationServiceProtocol):
 
         stop_checker = stop_requested or (lambda: False)
         sent_count = 0
+        failed_count = 0
+        daily_stats = _load_daily_stats()
         self._emit_log(log_callback, "info", "开始执行任务...")
         self._emit_log(log_callback, "info", f"使用模板: {execution_template_name}")
         self._emit_log(log_callback, "info", f"计划发送数量: {target_count} 个")
@@ -355,8 +365,10 @@ class AwinApplicationService(ApplicationServiceProtocol):
                     if success:
                         found_new = True
                         sent_count += 1
+                        daily_stats["success_count"] += 1
                         self._update_execution_progress(
                             sent_count=sent_count,
+                            failed_count=failed_count,
                             last_message=(
                                 f"第 {sent_count}/{target_count} 条消息发送成功 "
                                 f"(publisher: {publisher_id})"
@@ -369,10 +381,19 @@ class AwinApplicationService(ApplicationServiceProtocol):
                         )
                         break
 
+                    failed_count += 1
+                    daily_stats["failed_count"] += 1
+                    self._update_execution_progress(
+                        sent_count=sent_count,
+                        failed_count=failed_count,
+                        last_message=(
+                            f"发送失败 (publisher: {publisher_id})"
+                        ),
+                    )
                     self._emit_log(
                         log_callback,
                         "error",
-                        f"发送失败 (publisher: {publisher_id})",
+                        self._execution_state.last_message,
                     )
 
                 if not found_new and not stop_checker():
@@ -383,15 +404,17 @@ class AwinApplicationService(ApplicationServiceProtocol):
                     )
                     self._rpa.click_next_page()
 
+            _save_daily_stats(daily_stats)
             stopped = stop_checker() and sent_count < target_count
             completed = not stopped
             last_message = (
                 "任务已手动停止"
                 if stopped
-                else f"任务执行完成！共发送 {sent_count} 条邀请"
+                else f"任务执行完成！共发送 {sent_count} 条邀请，失败 {failed_count} 条"
             )
             self._finish_execution(
                 sent_count=sent_count,
+                failed_count=failed_count,
                 target_count=target_count,
                 last_message=last_message,
                 stopped=stopped,
@@ -404,14 +427,17 @@ class AwinApplicationService(ApplicationServiceProtocol):
             )
             return ExecutionResultViewModel(
                 sent_count=sent_count,
+                failed_count=failed_count,
                 target_count=target_count,
                 stopped=stopped,
                 completed=completed,
                 last_message=last_message,
             )
         except Exception as error:
+            _save_daily_stats(daily_stats)
             self._finish_execution(
                 sent_count=sent_count,
+                failed_count=failed_count,
                 target_count=target_count,
                 last_message=f"执行出错: {error}",
                 stopped=False,
@@ -549,6 +575,8 @@ class AwinApplicationService(ApplicationServiceProtocol):
             else len(self._clicked_ids_loader(self._clicked_ids_path))
         )
 
+        daily_stats_raw = _load_daily_stats()
+
         return AppRuntimeStateViewModel(
             templates=TemplatePanelViewModel(
                 templates=templates,
@@ -568,18 +596,27 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 last_error=self._connection_error,
             ),
             execution=self._execution_state.model_copy(deep=True),
+            daily_stats=DailyStatsViewModel(
+                date=daily_stats_raw.get("date", ""),
+                success_count=daily_stats_raw.get("success_count", 0),
+                failed_count=daily_stats_raw.get("failed_count", 0),
+            ),
         )
 
-    def _update_execution_progress(self, sent_count: int, last_message: str) -> None:
+    def _update_execution_progress(
+        self, sent_count: int, failed_count: int, last_message: str
+    ) -> None:
         """更新执行进度状态。"""
         with self._lock:
             self._execution_state.sent_count = sent_count
+            self._execution_state.failed_count = failed_count
             self._execution_state.last_message = last_message
             self._status_text = last_message
 
     def _finish_execution(
         self,
         sent_count: int,
+        failed_count: int,
         target_count: int,
         last_message: str,
         stopped: bool,
@@ -589,6 +626,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         with self._lock:
             self._execution_state.is_running = False
             self._execution_state.sent_count = sent_count
+            self._execution_state.failed_count = failed_count
             self._execution_state.target_count = target_count
             self._execution_state.last_message = last_message
             self._execution_state.last_error = error_message

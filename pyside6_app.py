@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QTimer, QThread, Qt, Signal
@@ -34,6 +36,75 @@ from app_interfaces import (
     InvitationTemplate,
 )
 from awin_application_service import AwinApplicationService
+
+LOG_FILE_PATH = Path(__file__).parent / "file.log"
+LOG_LEVEL_MAP = {
+    "INFO": "info",
+    "ERROR": "error",
+    "WARNING": "warning",
+    "WARN": "warning",
+    "SUCCESS": "success",
+    "DEBUG": "info",
+    "TRACE": "info",
+    "CRITICAL": "error",
+}
+
+
+def _parse_loguru_line(line: str) -> tuple[str, str, str] | None:
+    """解析 loguru 格式的日志行，返回 (timestamp_hhmmss, ui_level, message)。"""
+    # 格式: 2026-06-02 09:46:25.545 | INFO | __main__:func:188 - message
+    parts = line.split(" | ", 2)
+    if len(parts) < 3:
+        return None
+
+    timestamp_raw = parts[0].strip()
+    level_raw = parts[1].strip()
+    rest = parts[2].strip()
+
+    # 从 rest 中提取消息: module:function:line - message
+    msg_match = re.match(r"^[\w.]+:[\w_<>]+:\d+\s+-\s+(.*)$", rest)
+    if msg_match:
+        message = msg_match.group(1)
+    else:
+        if " - " in rest:
+            message = rest.split(" - ", 1)[1]
+        else:
+            message = rest
+
+    try:
+        dt = datetime.strptime(timestamp_raw, "%Y-%m-%d %H:%M:%S.%f")
+        timestamp = dt.strftime("%H:%M:%S")
+    except ValueError:
+        timestamp = timestamp_raw
+
+    ui_level = LOG_LEVEL_MAP.get(level_raw.upper(), "info")
+    return timestamp, ui_level, message
+
+
+def _load_file_log_lines(max_lines: int = 200) -> list[tuple[str, str, str]]:
+    """读取 file.log 的最后 max_lines 行，返回解析后的日志条目列表。"""
+    if not LOG_FILE_PATH.exists():
+        return []
+
+    try:
+        text = LOG_FILE_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return []
+
+    lines = text.splitlines()
+    lines = lines[-max_lines:]
+
+    entries: list[tuple[str, str, str]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        parsed = _parse_loguru_line(line)
+        if parsed:
+            entries.append(parsed)
+
+    return entries
+
 
 APP_STYLESHEET = """
 QMainWindow, QWidget#centralRoot {
@@ -822,6 +893,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._bind_events()
         self._apply_state(self._runtime_state)
+        self._load_history_logs()
         if self._auto_connect_browser and not self._runtime_state.connection.browser_connected:
             QTimer.singleShot(0, self._start_auto_connect)
 
@@ -1158,6 +1230,12 @@ class MainWindow(QMainWindow):
         self.log_output.appendPlainText(
             f"[{final_timestamp}] {level.upper()}: {message}"
         )
+
+    def _load_history_logs(self) -> None:
+        """加载本地 file.log 历史日志到日志面板。"""
+        entries = _load_file_log_lines(max_lines=200)
+        for timestamp, level, message in entries:
+            self._append_log(level, message, timestamp)
 
     def _show_info(self, message: str) -> None:
         QMessageBox.information(self, "提示", message)

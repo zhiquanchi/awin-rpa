@@ -80,6 +80,7 @@ AUDIT_LOG_PATH = Path(__file__).parent / "awin_audit.jsonl"
 SEEN_IDS_PATH = Path(__file__).parent / "seen_publisher_ids.txt"
 CLICKED_IDS_PATH = Path(__file__).parent / "clicked_publisher_ids.txt"
 FEISHU_WEBHOOK_PATH = Path(__file__).parent / "feishu_webhook.txt"
+DAILY_STATS_PATH = Path(__file__).parent / "awin_daily_stats.json"
 BROWSER_DEBUG_HOST = (
     os.getenv("AWIN_BROWSER_DEBUG_HOST", "127.0.0.1") or "127.0.0.1"
 ).strip()
@@ -241,6 +242,32 @@ def _append_new_ids(path: Path, ids: list[str]):
         for value in ids:
             if value:
                 f.write(f"{value}\n")
+
+
+def _load_daily_stats() -> dict:
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        if DAILY_STATS_PATH.exists():
+            data = json.loads(DAILY_STATS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("date") == today:
+                return {
+                    "date": today,
+                    "success_count": int(data.get("success_count", 0)),
+                    "failed_count": int(data.get("failed_count", 0)),
+                }
+    except Exception:
+        pass
+    return {"date": today, "success_count": 0, "failed_count": 0}
+
+
+def _save_daily_stats(stats: dict) -> None:
+    try:
+        DAILY_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DAILY_STATS_PATH.write_text(
+            json.dumps(stats, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.error(f"保存日统计失败: {e}")
 
 
 # 结构化审计日志：只记录与「ID 获取/点击」相关的事件，便于后续分析重复/失效按钮问题
@@ -1388,6 +1415,9 @@ class AwinRPA:
         """
         self.current_template_name = template_name.strip()
         sent_count = 0  # 已发送的邀请数量
+        failed_count = 0  # 失败的邀请数量
+
+        daily_stats = _load_daily_stats()
 
         while sent_count < invite_count:
             # 每次循环都重新从网页获取所有 publisher IDs
@@ -1419,21 +1449,31 @@ class AwinRPA:
                 if success:
                     found_new = True
                     sent_count += 1
+                    daily_stats["success_count"] += 1
                     console.print(
                         f"[green]✅ 已发送 {sent_count}/{invite_count}[/green]"
                     )
                     # 发送成功后立即跳出内层循环，重新获取页面上的所有 ID
                     break
+                else:
+                    failed_count += 1
+                    daily_stats["failed_count"] += 1
 
             # 如果当前页所有 ID 都已经点击过，进入下一页
             if not found_new:
                 logger.info("当前页所有 ID 都已经点击过，进入下一页")
                 self.click_next_page()
 
-        console.print(f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请[/bold green]")
+        _save_daily_stats(daily_stats)
+        console.print(
+            f"\n[bold green]✅ 已成功发送 {sent_count} 条邀请，失败 {failed_count} 条[/bold green]"
+        )
+        console.print(
+            f"[dim]📊 今日统计: 成功 {daily_stats['success_count']} 条，失败 {daily_stats['failed_count']} 条[/dim]"
+        )
         self._notify(
             "任务完成",
-            f"模板：{self._template_display_name()}\n已成功发送 {sent_count} 条邀请",
+            f"模板：{self._template_display_name()}\n已成功发送 {sent_count} 条邀请，失败 {failed_count} 条",
         )
 
 
