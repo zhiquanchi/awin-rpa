@@ -191,6 +191,79 @@ QLineEdit#webhookErrorInput {
     border: 1px solid #f56c6c;
     background-color: #fef0f0;
 }
+QListWidget#historyListWidget {
+    border: none;
+    background: transparent;
+    outline: none;
+}
+QListWidget#historyListWidget::item {
+    border-bottom: 1px solid #ebeef5;
+    padding: 0;
+}
+QListWidget#historyListWidget::item:last {
+    border-bottom: none;
+}
+QWidget#historyItem {
+    background: transparent;
+}
+QLabel#historyEmptyLabel {
+    color: #909399;
+    font-size: 13px;
+    padding: 24px 0;
+}
+QLabel#historyStatusRunning {
+    color: #409eff;
+    background-color: #ecf5ff;
+    border: 1px solid #b3d8ff;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#historyStatusCompleted {
+    color: #67c23a;
+    background-color: #f0f9eb;
+    border: 1px solid #c2e7b0;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#historyStatusStopped {
+    color: #e6a23c;
+    background-color: #fdf6ec;
+    border: 1px solid #f5dab1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#historyStatusError {
+    color: #f56c6c;
+    background-color: #fef0f0;
+    border: 1px solid #fbc4c4;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#historyTimeLabel {
+    color: #606266;
+    font-size: 13px;
+}
+QLabel#historyTemplateLabel {
+    color: #303133;
+    font-size: 13px;
+    font-weight: 500;
+}
+QLabel#historyStatLabel {
+    color: #606266;
+    font-size: 12px;
+}
+QLabel#historyDurationLabel {
+    color: #909399;
+    font-size: 12px;
+}
 """
 
 
@@ -455,6 +528,141 @@ class NotifyCard(QFrame):
         self.settings_changed.emit()
 
 
+class RecruitmentHistoryPanel(QFrame):
+    """招募历史记录面板。"""
+
+    STATUS_LABELS = {
+        "running": ("进行中", "historyStatusRunning"),
+        "completed": ("已完成", "historyStatusCompleted"),
+        "stopped": ("已停止", "historyStatusStopped"),
+        "error": ("出错", "historyStatusError"),
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("panelCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+
+        title = QLabel("招募历史记录", self)
+        title.setObjectName("panelTitle")
+        layout.addWidget(title)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.setObjectName("historyListWidget")
+        self.list_widget.setSelectionMode(QListWidget.NoSelection)
+        self.list_widget.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        layout.addWidget(self.list_widget)
+
+    def load_records(self, records: list) -> None:
+        """加载历史记录列表。"""
+        self.list_widget.clear()
+        if not records:
+            item = QListWidgetItem(self.list_widget)
+            empty_label = QLabel("暂无招募记录", self.list_widget)
+            empty_label.setObjectName("historyEmptyLabel")
+            empty_label.setAlignment(Qt.AlignCenter)
+            item.setSizeHint(empty_label.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, empty_label)
+            return
+
+        for record in records:
+            item = QListWidgetItem(self.list_widget)
+            widget = self._build_record_item(record)
+            item.setSizeHint(widget.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, widget)
+
+    def _build_record_item(self, record) -> QWidget:
+        """构建单条历史记录的自定义 widget。"""
+        widget = QWidget(self.list_widget)
+        widget.setObjectName("historyItem")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.setSpacing(6)
+
+        # 第一行：状态标签 + 时间 + 模板名
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        status_text, status_class = self.STATUS_LABELS.get(
+            record.status, ("未知", "historyStatusError")
+        )
+        status_label = QLabel(status_text, widget)
+        status_label.setObjectName(status_class)
+        status_label.setAlignment(Qt.AlignCenter)
+        status_label.setFixedWidth(60)
+        top_row.addWidget(status_label)
+
+        # 解析时间
+        try:
+            dt = datetime.fromisoformat(record.start_time)
+            time_text = dt.strftime("%m-%d %H:%M")
+        except (ValueError, AttributeError):
+            time_text = record.start_time or ""
+
+        time_label = QLabel(time_text, widget)
+        time_label.setObjectName("historyTimeLabel")
+        top_row.addWidget(time_label)
+
+        template_label = QLabel(record.template_name or "未命名模板", widget)
+        template_label.setObjectName("historyTemplateLabel")
+        top_row.addWidget(template_label)
+
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        # 第二行：统计信息
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(16)
+        stats_row.setContentsMargins(68, 0, 0, 0)  # 对齐状态标签右侧
+
+        success_label = QLabel(
+            f"<span style='color:#67c23a;'>成功 {record.success_count}</span>", widget
+        )
+        success_label.setObjectName("historyStatLabel")
+        stats_row.addWidget(success_label)
+
+        failed_label = QLabel(
+            f"<span style='color:#f56c6c;'>失败 {record.failed_count}</span>", widget
+        )
+        failed_label.setObjectName("historyStatLabel")
+        stats_row.addWidget(failed_label)
+
+        target_label = QLabel(f"目标 {record.target_count}", widget)
+        target_label.setObjectName("historyStatLabel")
+        stats_row.addWidget(target_label)
+
+        # 计算耗时
+        if record.end_time and record.start_time:
+            try:
+                start_dt = datetime.fromisoformat(record.start_time)
+                end_dt = datetime.fromisoformat(record.end_time)
+                delta = end_dt - start_dt
+                total_seconds = int(delta.total_seconds())
+                minutes = total_seconds // 60
+                seconds = total_seconds % 60
+                if minutes > 0:
+                    duration_text = f"耗时 {minutes}分{seconds}秒"
+                else:
+                    duration_text = f"耗时 {seconds}秒"
+            except (ValueError, AttributeError):
+                duration_text = ""
+        else:
+            duration_text = ""
+
+        if duration_text:
+            duration_label = QLabel(duration_text, widget)
+            duration_label.setObjectName("historyDurationLabel")
+            stats_row.addStretch()
+            stats_row.addWidget(duration_label)
+
+        layout.addLayout(stats_row)
+        return widget
+
+
 class ConnectBrowserWorker(QThread):
     """浏览器连接线程。"""
 
@@ -479,6 +687,7 @@ class ExecuteInvitesWorker(QThread):
 
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal()
 
     def __init__(
         self, service: ApplicationServiceProtocol, template_id: int | None
@@ -491,11 +700,16 @@ class ExecuteInvitesWorker(QThread):
     def request_stop(self) -> None:
         self._stop_event.set()
 
+    def _on_progress(self) -> None:
+        """进度回调（在执行线程中调用），通过 signal 切到主线程。"""
+        self.progress.emit()
+
     def run(self) -> None:
         try:
             result = self._service.execute_invites(
                 template_id=self._template_id,
                 stop_requested=self._stop_event.is_set,
+                progress_callback=self._on_progress,
             )
         except Exception as error:
             self.failed.emit(str(error))
@@ -897,7 +1111,13 @@ class MainWindow(QMainWindow):
         exec_layout.addWidget(self.execute_button)
         content_row.addWidget(exec_panel, stretch=3)
 
-        log_panel = QFrame(central)
+        # 右侧容器：日志面板 + 历史记录面板（垂直堆叠）
+        right_container = QWidget(central)
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        log_panel = QFrame(right_container)
         log_panel.setObjectName("panelCard")
         log_layout = QVBoxLayout(log_panel)
         log_layout.setContentsMargins(16, 16, 16, 16)
@@ -911,7 +1131,12 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("强制停止", log_panel)
         self.stop_button.setObjectName("dangerButton")
         log_layout.addWidget(self.stop_button)
-        content_row.addWidget(log_panel, stretch=2)
+        right_layout.addWidget(log_panel, stretch=3)
+
+        self.history_panel = RecruitmentHistoryPanel(right_container)
+        right_layout.addWidget(self.history_panel, stretch=2)
+
+        content_row.addWidget(right_container, stretch=2)
         root.addLayout(content_row, stretch=1)
 
     def _bind_events(self) -> None:
@@ -932,9 +1157,12 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: AppRuntimeStateViewModel) -> None:
         self._runtime_state = state
         self.sent_card.set_value(str(state.connection.clicked_records_count))
-        self.sent_card.set_subtitle("Send")
+        daily = state.daily_stats
+        today_text = f"今日成功 {daily.success_count} / 失败 {daily.failed_count}"
+        self.sent_card.set_subtitle(today_text)
         self._update_template_card(state)
         self.notify_card.load_from_state(state)
+        self.history_panel.load_records(state.recruitment_history)
         self.send_count_input.setValue(state.settings.send_count)
 
         is_connecting = (
@@ -1121,6 +1349,7 @@ class MainWindow(QMainWindow):
         self._execute_worker = ExecuteInvitesWorker(self.service, active_id)
         self._execute_worker.completed.connect(self._on_execution_completed)
         self._execute_worker.failed.connect(self._on_execution_failed)
+        self._execute_worker.progress.connect(self._on_execution_progress)
         self._execute_worker.start()
 
     def _on_stop_clicked(self) -> None:
@@ -1133,6 +1362,10 @@ class MainWindow(QMainWindow):
     def _on_log_received(self, timestamp: str, level: str, message: str) -> None:
         """loguru 实时日志回调（已在主线程）。"""
         self._append_log(level, message, timestamp)
+
+    def _on_execution_progress(self) -> None:
+        """执行进度实时更新（今日统计、历史记录）。"""
+        self._apply_state(self.service.get_state())
 
     def _on_execution_completed(self, result: ExecutionResultViewModel) -> None:
         self._apply_state(self.service.get_state())

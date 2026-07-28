@@ -125,6 +125,23 @@ class DailyStatsViewModel(BaseModel):
     failed_count: int = Field(default=0, ge=0)
 
 
+class RecruitmentTaskViewModel(BaseModel):
+    """招募任务历史记录视图模型。"""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    task_id: str
+    start_time: str  # ISO format
+    end_time: str | None = None
+    template_id: int | None = None
+    template_name: str = ""
+    target_count: int = Field(default=0, ge=0)
+    success_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+    status: str = "running"  # running / completed / stopped / error
+    last_message: str = ""
+
+
 class ExecutionStateViewModel(BaseModel):
     """执行状态视图模型。"""
 
@@ -173,6 +190,7 @@ class AppRuntimeStateViewModel(BaseModel):
     connection: BrowserConnectionViewModel
     execution: ExecutionStateViewModel
     daily_stats: DailyStatsViewModel = Field(default_factory=DailyStatsViewModel)
+    recruitment_history: list[RecruitmentTaskViewModel] = Field(default_factory=list)
 
 
 @runtime_checkable
@@ -335,5 +353,6 @@ class ApplicationServiceProtocol(Protocol):
         self,
         template_id: int | None,
         stop_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ) -> ExecutionResultViewModel:
         """同步执行邀请流程。"""

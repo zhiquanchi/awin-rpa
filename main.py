@@ -82,12 +82,15 @@ SEEN_IDS_PATH = _USER_CONFIG_DIR / "seen_publisher_ids.txt"
 CLICKED_IDS_PATH = _USER_CONFIG_DIR / "clicked_publisher_ids.txt"
 FEISHU_WEBHOOK_PATH = _USER_CONFIG_DIR / "feishu_webhook.txt"
 DAILY_STATS_PATH = _USER_CONFIG_DIR / "awin_daily_stats.json"
+RECRUITMENT_HISTORY_PATH = _USER_CONFIG_DIR / "recruitment_history.json"
+MAX_HISTORY_RECORDS = 50
 
 _migrate_if_needed(AUDIT_LOG_PATH, Path(__file__).parent / "awin_audit.jsonl")
 _migrate_if_needed(SEEN_IDS_PATH, Path(__file__).parent / "seen_publisher_ids.txt")
 _migrate_if_needed(CLICKED_IDS_PATH, Path(__file__).parent / "clicked_publisher_ids.txt")
 _migrate_if_needed(FEISHU_WEBHOOK_PATH, Path(__file__).parent / "feishu_webhook.txt")
 _migrate_if_needed(DAILY_STATS_PATH, Path(__file__).parent / "awin_daily_stats.json")
+_migrate_if_needed(RECRUITMENT_HISTORY_PATH, Path(__file__).parent / "recruitment_history.json")
 BROWSER_DEBUG_HOST = (
     os.getenv("AWIN_BROWSER_DEBUG_HOST", "127.0.0.1") or "127.0.0.1"
 ).strip()
@@ -271,6 +274,59 @@ def _save_daily_stats(stats: dict) -> None:
         )
     except Exception:
         logger.exception("保存日统计失败")
+
+
+def _reset_daily_stats() -> dict:
+    """重置今日统计为 0，返回新的统计数据。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    stats = {"date": today, "success_count": 0, "failed_count": 0}
+    _save_daily_stats(stats)
+    return stats
+
+
+def _load_recruitment_history() -> list[dict]:
+    """加载招募历史记录（按时间倒序，最多 MAX_HISTORY_RECORDS 条）。"""
+    try:
+        if not RECRUITMENT_HISTORY_PATH.exists():
+            return []
+        data = json.loads(RECRUITMENT_HISTORY_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data[:MAX_HISTORY_RECORDS]
+    except Exception:
+        logger.exception("加载招募历史记录失败")
+    return []
+
+
+def _save_recruitment_history(history: list[dict]) -> None:
+    """保存招募历史记录（截断到 MAX_HISTORY_RECORDS 条）。"""
+    try:
+        RECRUITMENT_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        trimmed = history[:MAX_HISTORY_RECORDS]
+        RECRUITMENT_HISTORY_PATH.write_text(
+            json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        logger.exception("保存招募历史记录失败")
+
+
+def _append_recruitment_task(task: dict) -> None:
+    """追加一条招募任务记录到历史记录头部。"""
+    history = _load_recruitment_history()
+    history.insert(0, task)
+    _save_recruitment_history(history)
+
+
+def _update_recruitment_task(task_id: str, updates: dict) -> None:
+    """更新指定 task_id 的招募任务记录。"""
+    history = _load_recruitment_history()
+    found = False
+    for record in history:
+        if record.get("task_id") == task_id:
+            record.update(updates)
+            found = True
+            break
+    if found:
+        _save_recruitment_history(history)
 
 
 class VersionManager:
@@ -1450,7 +1506,7 @@ class AwinRPA:
         return True
 
     def reset_clicked_ids(self):
-        """重置已点击记录，清空内存集合和持久化文件"""
+        """重置已点击记录，清空内存集合和持久化文件，同时重置今日统计"""
         count = len(self._clicked_publisher_ids)
         self._clicked_publisher_ids.clear()
         try:
@@ -1458,6 +1514,7 @@ class AwinRPA:
                 CLICKED_IDS_PATH.write_text("", encoding="utf-8")
         except Exception:
             logger.exception("清空已点击记录文件失败")
+        _reset_daily_stats()
         logger.info(f"已重置已点击记录，共清除 {count} 条")
         return count
 

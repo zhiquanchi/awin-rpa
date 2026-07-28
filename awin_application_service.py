@@ -16,6 +16,7 @@ from app_interfaces import (
     ExecutionStateViewModel,
     InvitationTemplate,
     NotifyChannel,
+    RecruitmentTaskViewModel,
     RpaRunnerProtocol,
     SettingsRepositoryProtocol,
     SettingsViewModel,
@@ -30,10 +31,14 @@ from DrissionPage.errors import PageDisconnectedError
 from main import (
     AwinRPA,
     CLICKED_IDS_PATH,
+    _append_recruitment_task,
     _is_tcp_port_open,
     _load_id_set,
     _load_daily_stats,
+    _load_recruitment_history,
+    _reset_daily_stats,
     _save_daily_stats,
+    _update_recruitment_task,
 )
 
 
@@ -251,7 +256,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
             return False
 
     def reset_clicked_ids(self) -> tuple[int, AppRuntimeStateViewModel]:
-        """重置已点击记录，并返回清理数量和运行态。"""
+        """重置已点击记录，并返回清理数量和运行态。同时重置今日统计。"""
         with self._lock:
             self._ensure_bootstrapped()
             if self._rpa is not None:
@@ -261,6 +266,9 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 cleared_count = len(clicked_ids)
                 if self._clicked_ids_path.exists():
                     self._clicked_ids_path.write_text("", encoding="utf-8")
+
+            # 同时重置今日统计，保持数字一致
+            _reset_daily_stats()
 
             self._status_text = (
                 f"已清除 {cleared_count} 条已点击记录"
@@ -274,10 +282,12 @@ class AwinApplicationService(ApplicationServiceProtocol):
         self,
         template_id: int | None,
         stop_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ) -> ExecutionResultViewModel:
         """同步执行邀请流程，由调用方负责线程调度。
 
         执行日志通过 loguru 全局 logger 输出，UI 层可注册自定义 sink 实时获取。
+        progress_callback 在每次进度更新时调用，用于 UI 实时刷新。
         """
         # 确保日志系统已初始化（service 可能在 setup_logging 之前被创建）
         setup_logging()
@@ -306,6 +316,25 @@ class AwinApplicationService(ApplicationServiceProtocol):
         sent_count = 0
         failed_count = 0
         daily_stats = _load_daily_stats()
+
+        # 记录招募任务开始
+        from datetime import datetime
+
+        task_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        task_record = {
+            "task_id": task_id,
+            "start_time": datetime.now().astimezone().isoformat(),
+            "end_time": None,
+            "template_id": execution_template_id,
+            "template_name": execution_template_name,
+            "target_count": target_count,
+            "success_count": 0,
+            "failed_count": 0,
+            "status": "running",
+            "last_message": "开始执行任务...",
+        }
+        _append_recruitment_task(task_record)
+
         self._emit_log("info", "开始执行任务...")
         self._emit_log("info", f"使用模板: {execution_template_name}")
         self._emit_log("info", f"计划发送数量: {target_count} 个")
@@ -361,6 +390,18 @@ class AwinApplicationService(ApplicationServiceProtocol):
                                 f"(publisher: {publisher_id})"
                             ),
                         )
+                        # 实时更新历史记录与每日统计
+                        _save_daily_stats(daily_stats)
+                        _update_recruitment_task(
+                            task_id,
+                            {
+                                "success_count": sent_count,
+                                "failed_count": failed_count,
+                                "last_message": self._execution_state.last_message,
+                            },
+                        )
+                        if progress_callback:
+                            progress_callback()
                         self._emit_log(
                             "success",
                             self._execution_state.last_message,
@@ -376,6 +417,18 @@ class AwinApplicationService(ApplicationServiceProtocol):
                             f"发送失败 (publisher: {publisher_id})"
                         ),
                     )
+                    # 实时更新历史记录与每日统计
+                    _save_daily_stats(daily_stats)
+                    _update_recruitment_task(
+                        task_id,
+                        {
+                            "success_count": sent_count,
+                            "failed_count": failed_count,
+                            "last_message": self._execution_state.last_message,
+                        },
+                    )
+                    if progress_callback:
+                        progress_callback()
                     self._emit_log(
                         "error",
                         self._execution_state.last_message,
@@ -391,10 +444,24 @@ class AwinApplicationService(ApplicationServiceProtocol):
             _save_daily_stats(daily_stats)
             stopped = stop_checker() and sent_count < target_count
             completed = not stopped
+            status = "stopped" if stopped else "completed"
             last_message = (
                 "任务已手动停止"
                 if stopped
                 else f"任务执行完成！共发送 {sent_count} 条邀请，失败 {failed_count} 条"
+            )
+            # 更新招募历史记录
+            from datetime import datetime
+
+            _update_recruitment_task(
+                task_id,
+                {
+                    "end_time": datetime.now().astimezone().isoformat(),
+                    "success_count": sent_count,
+                    "failed_count": failed_count,
+                    "status": status,
+                    "last_message": last_message,
+                },
             )
             self._finish_execution(
                 sent_count=sent_count,
@@ -418,6 +485,19 @@ class AwinApplicationService(ApplicationServiceProtocol):
             )
         except PageDisconnectedError as error:
             _save_daily_stats(daily_stats)
+            # 更新招募历史记录
+            from datetime import datetime
+
+            _update_recruitment_task(
+                task_id,
+                {
+                    "end_time": datetime.now().astimezone().isoformat(),
+                    "success_count": sent_count,
+                    "failed_count": failed_count,
+                    "status": "error",
+                    "last_message": "浏览器标签页已断开",
+                },
+            )
             # 标签页断开时，标记浏览器为已断开，让 UI 反映真实状态
             with self._lock:
                 self._rpa = None
@@ -437,6 +517,19 @@ class AwinApplicationService(ApplicationServiceProtocol):
             raise RuntimeError(friendly_msg) from error
         except Exception as error:
             _save_daily_stats(daily_stats)
+            # 更新招募历史记录
+            from datetime import datetime
+
+            _update_recruitment_task(
+                task_id,
+                {
+                    "end_time": datetime.now().astimezone().isoformat(),
+                    "success_count": sent_count,
+                    "failed_count": failed_count,
+                    "status": "error",
+                    "last_message": f"执行出错: {error}",
+                },
+            )
             self._finish_execution(
                 sent_count=sent_count,
                 failed_count=failed_count,
@@ -550,6 +643,10 @@ class AwinApplicationService(ApplicationServiceProtocol):
         )
 
         daily_stats_raw = _load_daily_stats()
+        history_raw = _load_recruitment_history()
+        recruitment_history = [
+            RecruitmentTaskViewModel(**record) for record in history_raw
+        ]
 
         return AppRuntimeStateViewModel(
             templates=TemplatePanelViewModel(
@@ -574,6 +671,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 success_count=daily_stats_raw.get("success_count", 0),
                 failed_count=daily_stats_raw.get("failed_count", 0),
             ),
+            recruitment_history=recruitment_history,
         )
 
     def _update_execution_progress(
