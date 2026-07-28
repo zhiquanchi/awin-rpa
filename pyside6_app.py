@@ -1450,11 +1450,21 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "错误", message)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        """窗口关闭时注销 loguru UI sink。"""
-        if self._ui_sink_id is not None:
-            unregister_ui_sink(self._ui_sink_id)
-            self._ui_sink_id = None
-        super().closeEvent(event)
+        """窗口关闭时弹出二次确认。"""
+        reply = QMessageBox.question(
+            self,
+            "确认退出",
+            "确定要退出程序吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if self._ui_sink_id is not None:
+                unregister_ui_sink(self._ui_sink_id)
+                self._ui_sink_id = None
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 
 def main() -> int:
