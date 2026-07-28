@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from app_interfaces import AppSettings, InvitationTemplate
 from awin_application_service import AwinApplicationService
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
+from logging_setup import setup_logging
 
 
 class FakeRpaRunner:
@@ -98,6 +100,7 @@ def test_delete_template_repairs_active_index(local_paths: tuple[Path, Path]) ->
 
 def test_connect_execute_and_reset_flow(local_paths: tuple[Path, Path]) -> None:
     """服务应完成连接、执行与重置流程。"""
+    setup_logging()
     config_path, template_path = local_paths
     repository = JsonTemplateRepository(file_path=template_path)
     repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
@@ -106,27 +109,33 @@ def test_connect_execute_and_reset_flow(local_paths: tuple[Path, Path]) -> None:
     settings.send_count = 1
     fake_rpa = FakeRpaRunner(None, None)
     log_messages: list[str] = []
-    service = AwinApplicationService(
-        template_repository=repository,
-        settings_factory=lambda: ConfigManager(config_path=config_path),
-        rpa_factory=lambda notify_channel, webhook: fake_rpa,
-    )
-    service.bootstrap()
 
-    connected_state = service.connect_browser()
-    result = service.execute_invites(
-        template_id=1,
-        log_callback=lambda entry: log_messages.append(entry.message),
-    )
-    cleared_count, reset_state = service.reset_clicked_ids()
+    # 用 loguru sink 捕获日志消息
+    def _capture_sink(message):
+        log_messages.append(message.record["message"])
 
-    assert connected_state.connection.browser_connected is True
-    assert result.completed is True
-    assert result.sent_count == 1
-    assert "开始执行任务..." in log_messages
-    assert "第 1/1 条消息发送成功 (publisher: 1001)" in log_messages
-    assert cleared_count == 1
-    assert reset_state.connection.clicked_records_count == 0
+    sink_id = logger.add(_capture_sink, level="INFO")
+    try:
+        service = AwinApplicationService(
+            template_repository=repository,
+            settings_factory=lambda: ConfigManager(config_path=config_path),
+            rpa_factory=lambda notify_channel, webhook: fake_rpa,
+        )
+        service.bootstrap()
+
+        connected_state = service.connect_browser()
+        result = service.execute_invites(template_id=1)
+        cleared_count, reset_state = service.reset_clicked_ids()
+
+        assert connected_state.connection.browser_connected is True
+        assert result.completed is True
+        assert result.sent_count == 1
+        assert "开始执行任务..." in log_messages
+        assert "第 1/1 条消息发送成功 (publisher: 1001)" in log_messages
+        assert cleared_count == 1
+        assert reset_state.connection.clicked_records_count == 0
+    finally:
+        logger.remove(sink_id)
 
 
 def test_connect_browser_does_not_require_active_template(

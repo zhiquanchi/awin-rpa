@@ -3,6 +3,5 @@
   "selected_template_index": 0,
   "active_template_index": 0,
   "notify_channel": "desktop",
-  "feishu_webhook_url": "",
-  "sync_url": "http://localhost:8080"
+  "feishu_webhook_url": ""
 }

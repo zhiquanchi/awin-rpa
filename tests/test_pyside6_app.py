@@ -42,7 +42,6 @@ class FakeApplicationService:
                 send_count=3,
                 notify_channel="desktop",
                 feishu_webhook_url="",
-                sync_url="http://localhost:8080",
             ),
             connection=BrowserConnectionViewModel(
                 browser_connected=False,
@@ -54,9 +53,6 @@ class FakeApplicationService:
         )
 
     def bootstrap(self) -> AppRuntimeStateViewModel:
-        return self.state
-
-    def refresh_from_remote(self) -> AppRuntimeStateViewModel:
         return self.state
 
     def get_state(self) -> AppRuntimeStateViewModel:
@@ -127,7 +123,7 @@ class FakeApplicationService:
         return cleared, self.state
 
     def execute_invites(
-        self, template_id: int | None, stop_requested=None, log_callback=None
+        self, template_id: int | None, stop_requested=None
     ) -> ExecutionResultViewModel:
         self.state.execution.is_running = False
         return ExecutionResultViewModel(

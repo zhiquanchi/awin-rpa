@@ -50,7 +50,7 @@ class JsonTemplateRepository:
 
     def save_templates(self, templates: Sequence[InvitationTemplate]) -> None:
         """Save templates to disk using the repository JSON format."""
-        payload = self.to_sync_payload(templates)
+        payload = self.to_storage_payload(templates)
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.file_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -71,7 +71,7 @@ class JsonTemplateRepository:
         self.save_templates(default_templates)
         return default_templates
 
-    def to_sync_payload(
+    def to_storage_payload(
         self, templates: Sequence[InvitationTemplate]
     ) -> list[dict[str, str]]:
         """Convert validated templates into the storage payload format."""

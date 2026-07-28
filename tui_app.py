@@ -1003,9 +1003,6 @@ class TemplateManagerApp(App):
             self.app_service.execute_invites(
                 template_id=selected_template_id,
                 stop_requested=lambda: not self.is_running,
-                log_callback=lambda entry: self.call_from_thread(
-                    self._add_log, entry.level, entry.message
-                ),
             )
             self.call_from_thread(
                 self._apply_service_state, self.app_service.get_state()

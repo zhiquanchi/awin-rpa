@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import questionary
 from DrissionPage import Chromium, ChromiumOptions
+from DrissionPage.errors import PageDisconnectedError
 from loguru import logger
 
 # 兼容性猴子补丁：尝试为 questionary 的多行输入替换默认提示文本
@@ -71,13 +72,12 @@ from rich.panel import Panel
 from app_interfaces import InvitationTemplate
 from config_manager import ConfigManager, _migrate_if_needed, get_user_config_dir
 from json_template_repository import JsonTemplateRepository
+from logging_setup import AUDIT_LOG_PATH
 
 console = Console()
-logger.add("file.log")
 
 
 _USER_CONFIG_DIR = get_user_config_dir()
-AUDIT_LOG_PATH = _USER_CONFIG_DIR / "awin_audit.jsonl"
 SEEN_IDS_PATH = _USER_CONFIG_DIR / "seen_publisher_ids.txt"
 CLICKED_IDS_PATH = _USER_CONFIG_DIR / "clicked_publisher_ids.txt"
 FEISHU_WEBHOOK_PATH = _USER_CONFIG_DIR / "feishu_webhook.txt"
@@ -223,10 +223,6 @@ def _ensure_local_debug_chrome(
     )
 
 
-def _audit_filter(record) -> bool:
-    return bool(record["extra"].get("audit"))
-
-
 def _load_id_set(path: Path) -> set[str]:
     try:
         if not path.exists():
@@ -273,17 +269,8 @@ def _save_daily_stats(stats: dict) -> None:
         DAILY_STATS_PATH.write_text(
             json.dumps(stats, ensure_ascii=False), encoding="utf-8"
         )
-    except Exception as e:
-        logger.error(f"保存日统计失败: {e}")
-
-
-# 结构化审计日志：只记录与「ID 获取/点击」相关的事件，便于后续分析重复/失效按钮问题
-logger.add(
-    AUDIT_LOG_PATH,
-    serialize=True,
-    filter=_audit_filter,
-    level="INFO",
-)
+    except Exception:
+        logger.exception("保存日统计失败")
 
 
 class VersionManager:
@@ -301,8 +288,8 @@ class VersionManager:
                 match = re.search(r'version\s*=\s*"([^"]+)"', content)
                 if match:
                     return match.group(1)
-        except Exception as e:
-            logger.error(f"读取版本失败: {e}")
+        except Exception:
+            logger.exception("读取版本失败")
         return "0.1.0"
 
     def update_version(self, new_version: str) -> bool:
@@ -337,7 +324,7 @@ class VersionManager:
             console.print(f"[green]✅ 版本已更新为: {new_version}[/green]")
             return True
         except Exception as e:
-            logger.error(f"更新版本失败: {e}")
+            logger.exception("更新版本失败")
             console.print(f"[red]❌ 更新版本失败: {e}[/red]")
             return False
 
@@ -348,8 +335,8 @@ class VersionManager:
         """
         try:
             repo = Repo(str(self.repo_path))
-        except Exception as e:
-            logger.error(f"无法打开 Git 仓库: {e}")
+        except Exception:
+            logger.exception("无法打开 Git 仓库")
             console.print("[red]❌ 目录不是一个 Git 仓库或无法访问[/red]")
             return False
 
@@ -383,7 +370,7 @@ class VersionManager:
             console.print(f"[green]✅ 已提交版本更新: {commit_message}[/green]")
             return True
         except Exception as e:
-            logger.error(f"提交版本更改失败: {e}")
+            logger.exception("提交版本更改失败")
             console.print(f"[red]❌ 提交失败: {e}[/red]")
             return False
 
@@ -406,8 +393,8 @@ class VersionManager:
                 "unstaged": [f.decode("utf-8") for f in status.unstaged],
                 "untracked": [f.decode("utf-8") for f in status.untracked],
             }
-        except Exception as e:
-            logger.error(f"获取 Git 状态失败: {e}")
+        except Exception:
+            logger.exception("获取 Git 状态失败")
             return {"staged": [], "unstaged": [], "untracked": []}
 
 
@@ -464,15 +451,15 @@ class Updater:
             with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
                 content = resp.read().decode("utf-8")
         except urllib.error.URLError as e:
-            logger.error(f"检查更新失败（网络错误）: {e}")
+            logger.exception("检查更新失败（网络错误）")
             return {
                 "has_update": False,
                 "local_version": local_version,
                 "remote_version": "",
                 "error": f"无法连接 GitHub: {e}",
             }
-        except Exception as e:
-            logger.error(f"检查更新失败: {e}")
+        except Exception:
+            logger.exception("检查更新失败")
             return {
                 "has_update": False,
                 "local_version": local_version,
@@ -548,8 +535,8 @@ class Updater:
                 "message": f"更新成功，新版本: {new_version}，请重新启动程序以生效。",
             }
 
-        except Exception as e:
-            logger.error(f"下载更新失败: {e}")
+        except Exception:
+            logger.exception("下载更新失败")
             # 回滚：将备份文件恢复
             for filename, bak_path in backup_map.items():
                 target = self.base_dir / filename
@@ -750,6 +737,9 @@ class AwinRPA:
         self._seen_publisher_ids: set[str] = _load_id_set(SEEN_IDS_PATH)
         self._clicked_publisher_ids: set[str] = _load_id_set(CLICKED_IDS_PATH)
 
+        if self.tab is None:
+            raise RuntimeError("无法获取可用的浏览器标签页，请检查浏览器状态。")
+
     def _connect_browser(self) -> Chromium:
         address = f"{self.browser_host}:{self.browser_port}"
         if not _is_tcp_port_open(self.browser_host, self.browser_port):
@@ -822,6 +812,20 @@ class AwinRPA:
         """
         logger.info(f"邀请失败（已跳过）: publisher={publisher_id}，原因={reason}")
 
+    def is_alive(self) -> bool:
+        """检查浏览器和当前标签页是否仍处于连接状态。"""
+        try:
+            tab = self.tab
+            if tab is None:
+                return False
+            # 通过尝试读取标签页 URL 来检测是否已断开
+            _ = tab.url
+            return True
+        except PageDisconnectedError:
+            return False
+        except Exception:
+            return False
+
     def _select_awin_tab(self):
         """
         选择 URL 中包含 'awin' 的标签页；若未找到则回退为最新标签页
@@ -850,7 +854,25 @@ class AwinRPA:
                         continue
         except Exception:
             pass
-        return getattr(self.browser, "latest_tab", None)
+
+        # 回退：尝试使用 latest_tab，并确保它是存活的
+        latest_tab = getattr(self.browser, "latest_tab", None)
+        if latest_tab is not None:
+            try:
+                _ = latest_tab.url  # 测试标签页是否存活
+                return latest_tab
+            except Exception:
+                pass
+
+        # 最后的兜底：新建一个标签页
+        new_tab = getattr(self.browser, "new_tab", None)
+        if callable(new_tab):
+            try:
+                return new_tab()
+            except Exception:
+                pass
+
+        return None
 
     def refresh_tab(self):
         """重新获取当前浏览器标签页（不刷新页面）"""
@@ -860,6 +882,35 @@ class AwinRPA:
         """跳转到邀请页面"""
         target_url = url or self.DEFAULT_URL
         self.tab.get(target_url)
+
+    def ensure_on_directory_page(self, url: str | None = None) -> bool:
+        """确保当前标签页在 AWIN publisher 目录页面上。
+
+        如果当前 URL 不匹配则导航过去，并等待页面关键元素加载。
+        返回 True 表示页面已就绪，False 表示失败。
+        """
+        target_url = url or self.DEFAULT_URL
+        try:
+            current_url = self.tab.url or ""
+            # 如果已经在目标页面（忽略 hash 和查询参数差异），检查表格是否存在
+            if "awin.com" in current_url and "affiliate-directory" in current_url:
+                try:
+                    self.tab.ele('xpath=//*[@id="directoryResults"]/table', timeout=2)
+                    return True
+                except Exception:
+                    # 页面可能还在加载，继续走导航流程
+                    pass
+
+            # 导航到目标页面
+            self.tab.get(target_url)
+            # 等待目录表格出现，确认页面加载完成
+            self.tab.ele('xpath=//*[@id="directoryResults"]/table', timeout=30)
+            return True
+        except PageDisconnectedError:
+            raise
+        except Exception as error:
+            logger.error(f"导航到目录页面失败: {error}")
+            return False
 
     def select_sector(self, *sectors: str):
         """选择筛选项目"""
@@ -1405,8 +1456,8 @@ class AwinRPA:
         try:
             if CLICKED_IDS_PATH.exists():
                 CLICKED_IDS_PATH.write_text("", encoding="utf-8")
-        except Exception as e:
-            logger.error(f"清空已点击记录文件失败: {e}")
+        except Exception:
+            logger.exception("清空已点击记录文件失败")
         logger.info(f"已重置已点击记录，共清除 {count} 条")
         return count
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Callable
+
+from loguru import logger
 
 from app_interfaces import (
     AppRuntimeStateViewModel,
@@ -11,7 +12,6 @@ from app_interfaces import (
     AppSettings,
     BrowserConnectionViewModel,
     DailyStatsViewModel,
-    ExecutionLogEntryViewModel,
     ExecutionResultViewModel,
     ExecutionStateViewModel,
     InvitationTemplate,
@@ -24,6 +24,9 @@ from app_interfaces import (
 )
 from config_manager import ConfigManager
 from json_template_repository import JsonTemplateRepository
+from logging_setup import setup_logging
+from DrissionPage.errors import PageDisconnectedError
+
 from main import (
     AwinRPA,
     CLICKED_IDS_PATH,
@@ -233,11 +236,17 @@ class AwinApplicationService(ApplicationServiceProtocol):
             return self._build_state()
 
     def _is_browser_session_alive(self) -> bool:
-        """判断当前 RPA 会话对应的调试端口是否仍可用。"""
+        """判断当前 RPA 会话是否存活（端口可用且标签页未断开）。"""
         if self._rpa is None:
             return False
         try:
-            return _is_tcp_port_open(self._rpa.browser_host, self._rpa.browser_port)
+            if not _is_tcp_port_open(self._rpa.browser_host, self._rpa.browser_port):
+                return False
+            # 进一步验证标签页是否真的还连着
+            is_alive = getattr(self._rpa, "is_alive", None)
+            if callable(is_alive):
+                return is_alive()
+            return True
         except Exception:
             return False
 
@@ -265,9 +274,14 @@ class AwinApplicationService(ApplicationServiceProtocol):
         self,
         template_id: int | None,
         stop_requested: Callable[[], bool] | None = None,
-        log_callback: Callable[[ExecutionLogEntryViewModel], None] | None = None,
     ) -> ExecutionResultViewModel:
-        """同步执行邀请流程，由调用方负责线程调度。"""
+        """同步执行邀请流程，由调用方负责线程调度。
+
+        执行日志通过 loguru 全局 logger 输出，UI 层可注册自定义 sink 实时获取。
+        """
+        # 确保日志系统已初始化（service 可能在 setup_logging 之前被创建）
+        setup_logging()
+
         with self._lock:
             self._ensure_bootstrapped()
             selected_template = self._resolve_template(template_id)
@@ -292,21 +306,20 @@ class AwinApplicationService(ApplicationServiceProtocol):
         sent_count = 0
         failed_count = 0
         daily_stats = _load_daily_stats()
-        self._emit_log(log_callback, "info", "开始执行任务...")
-        self._emit_log(log_callback, "info", f"使用模板: {execution_template_name}")
-        self._emit_log(log_callback, "info", f"计划发送数量: {target_count} 个")
+        self._emit_log("info", "开始执行任务...")
+        self._emit_log("info", f"使用模板: {execution_template_name}")
+        self._emit_log("info", f"计划发送数量: {target_count} 个")
 
         try:
             assert self._rpa is not None
             self._rpa.current_template_name = execution_template_name
 
             while sent_count < target_count and not stop_checker():
-                self._emit_log(log_callback, "info", "正在获取 publisher 列表...")
+                self._emit_log("info", "正在获取 publisher 列表...")
                 publisher_ids = self._rpa.get_publisher_ids()
 
                 if not publisher_ids:
                     self._emit_log(
-                        log_callback,
                         "info",
                         "当前页面没有可邀请的 publisher，尝试下一页",
                     )
@@ -314,7 +327,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                     continue
 
                 self._emit_log(
-                    log_callback,
                     "info",
                     f"当前页面找到 {len(publisher_ids)} 个可邀请的 publisher",
                 )
@@ -331,7 +343,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                         continue
 
                     self._emit_log(
-                        log_callback,
                         "info",
                         f"正在向 publisher {publisher_id} 发送邀请...",
                     )
@@ -351,7 +362,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                             ),
                         )
                         self._emit_log(
-                            log_callback,
                             "success",
                             self._execution_state.last_message,
                         )
@@ -367,14 +377,12 @@ class AwinApplicationService(ApplicationServiceProtocol):
                         ),
                     )
                     self._emit_log(
-                        log_callback,
                         "error",
                         self._execution_state.last_message,
                     )
 
                 if not found_new and not stop_checker():
                     self._emit_log(
-                        log_callback,
                         "info",
                         "当前页所有 ID 都已处理，进入下一页",
                     )
@@ -397,7 +405,6 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 error_message=None,
             )
             self._emit_log(
-                log_callback,
                 "error" if stopped else "success",
                 last_message,
             )
@@ -409,6 +416,25 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 completed=completed,
                 last_message=last_message,
             )
+        except PageDisconnectedError as error:
+            _save_daily_stats(daily_stats)
+            # 标签页断开时，标记浏览器为已断开，让 UI 反映真实状态
+            with self._lock:
+                self._rpa = None
+                self._connection_error = "浏览器标签页已断开"
+                self._status_text = "浏览器已断开"
+            friendly_msg = "浏览器标签页已断开，请重新连接浏览器后再执行"
+            self._emit_log("error", friendly_msg)
+            self._finish_execution(
+                sent_count=sent_count,
+                failed_count=failed_count,
+                target_count=target_count,
+                last_message=friendly_msg,
+                stopped=False,
+                error_message=friendly_msg,
+            )
+            logger.error(f"浏览器标签页断开: {error}")
+            raise RuntimeError(friendly_msg) from error
         except Exception as error:
             _save_daily_stats(daily_stats)
             self._finish_execution(
@@ -419,7 +445,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 stopped=False,
                 error_message=str(error),
             )
-            self._emit_log(log_callback, "error", f"执行出错: {error}")
+            logger.exception("执行出错")
             raise RuntimeError(f"执行出错: {error}") from error
 
     def _initialize_runtime(self) -> None:
@@ -580,20 +606,14 @@ class AwinApplicationService(ApplicationServiceProtocol):
             self._status_text = "已停止" if stopped else "执行完成，等待下一次执行..."
             self._connection_error = error_message
 
-    def _emit_log(
-        self,
-        log_callback: Callable[[ExecutionLogEntryViewModel], None] | None,
-        level: str,
-        message: str,
-    ) -> None:
-        """向调用方发送一条执行日志。"""
-        if log_callback is None:
-            return
-
-        log_callback(
-            ExecutionLogEntryViewModel(
-                timestamp=datetime.now().strftime("%H:%M:%S"),
-                level=level,
-                message=message,
-            )
-        )
+    def _emit_log(self, level: str, message: str) -> None:
+        """通过 loguru 输出一条执行日志，UI 层通过 sink 实时接收。"""
+        level_lower = level.lower()
+        if level_lower == "success":
+            logger.log("SUCCESS", message)
+        elif level_lower == "error":
+            logger.error(message)
+        elif level_lower == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)

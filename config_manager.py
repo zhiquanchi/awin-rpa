@@ -1,26 +1,26 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from platformdirs import user_config_dir
 
 from app_interfaces import AppSettings, NotifyChannel
 
-APP_CONFIG_DIR_NAME = "AwinRPA"
+APP_NAME = "AwinRPA"
 
 
 def get_user_config_dir() -> Path:
-    """获取用户配置文件夹路径（Windows: %APPDATA%\\AwinRPA）。"""
-    appdata = os.getenv("APPDATA")
-    if appdata:
-        base_dir = Path(appdata)
-    else:
-        base_dir = Path.home() / "AppData" / "Roaming"
-    config_dir = base_dir / APP_CONFIG_DIR_NAME
+    """获取用户配置文件夹路径（跨平台）。
+
+    - Windows: %APPDATA%\\AwinRPA
+    - macOS: ~/Library/Application Support/AwinRPA
+    - Linux: ~/.config/AwinRPA
+    """
+    config_dir = Path(user_config_dir(appname=APP_NAME, appauthor=False, roaming=True))
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
@@ -43,9 +43,18 @@ class ConfigManager:
 
     def __init__(self, config_path: Path | None = None) -> None:
         if config_path is None:
-            default_path = get_user_config_dir() / "tui_config.json"
-            legacy_path = Path(__file__).parent / "tui_config.json"
-            _migrate_if_needed(default_path, legacy_path)
+            default_path = get_user_config_dir() / "settings.json"
+            # 兼容旧文件名 tui_config.json
+            legacy_in_config_dir = get_user_config_dir() / "tui_config.json"
+            if legacy_in_config_dir.exists() and not default_path.exists():
+                try:
+                    legacy_in_config_dir.rename(default_path)
+                    logger.info(f"已重命名配置文件为 {default_path.name}")
+                except OSError as error:
+                    logger.warning(f"重命名配置文件失败: {error}")
+            # 从项目根目录迁移
+            legacy_root_path = Path(__file__).parent / "tui_config.json"
+            _migrate_if_needed(default_path, legacy_root_path)
             config_path = default_path
         self.config_path = config_path
         self._settings = self._load()
@@ -66,11 +75,14 @@ class ConfigManager:
             logger.warning("配置文件格式无效，已回退到默认配置。")
             return AppSettings()
 
+        # 移除已废弃的云端同步字段（如果存在）
+        raw_config.pop("sync_url", None)
+
         return AppSettings.model_validate(raw_config)
 
     def _update(self, **changes: Any) -> None:
         """Validate and persist incremental settings updates."""
-        payload = self.to_sync_payload()
+        payload = self.to_storage_payload()
         payload.update(changes)
         self.replace(AppSettings.model_validate(payload))
 
@@ -78,7 +90,7 @@ class ConfigManager:
         """Persist the current settings snapshot to disk."""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as file:
-            json.dump(self.to_sync_payload(), file, ensure_ascii=False, indent=2)
+            json.dump(self.to_storage_payload(), file, ensure_ascii=False, indent=2)
 
     def replace(self, settings: AppSettings) -> None:
         """Replace the current settings with a validated model snapshot."""
@@ -89,7 +101,7 @@ class ConfigManager:
         """Return a defensive copy of the current settings model."""
         return self._settings.model_copy(deep=True)
 
-    def to_sync_payload(self) -> dict[str, Any]:
+    def to_storage_payload(self) -> dict[str, Any]:
         """Return the JSON payload used for local persistence."""
         return self._settings.to_storage_payload()
 

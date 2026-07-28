@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import re
 import sys
 from datetime import datetime
-from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QTimer, QThread, Qt, Signal
@@ -26,83 +24,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from loguru import logger
 
 from app_interfaces import (
     AppRuntimeStateViewModel,
     ApplicationServiceProtocol,
-    ExecutionLogEntryViewModel,
     ExecutionResultViewModel,
     InvitationTemplate,
 )
 from awin_application_service import AwinApplicationService
+from logging_setup import get_log_file_path, register_ui_sink, setup_logging, unregister_ui_sink
 
-LOG_FILE_PATH = Path(__file__).parent / "file.log"
-LOG_LEVEL_MAP = {
-    "INFO": "info",
-    "ERROR": "error",
-    "WARNING": "warning",
-    "WARN": "warning",
-    "SUCCESS": "success",
-    "DEBUG": "info",
-    "TRACE": "info",
-    "CRITICAL": "error",
-}
-
-
-def _parse_loguru_line(line: str) -> tuple[str, str, str] | None:
-    """解析 loguru 格式的日志行，返回 (timestamp_hhmmss, ui_level, message)。"""
-    # 格式: 2026-06-02 09:46:25.545 | INFO | __main__:func:188 - message
-    parts = line.split(" | ", 2)
-    if len(parts) < 3:
-        return None
-
-    timestamp_raw = parts[0].strip()
-    level_raw = parts[1].strip()
-    rest = parts[2].strip()
-
-    # 从 rest 中提取消息: module:function:line - message
-    msg_match = re.match(r"^[\w.]+:[\w_<>]+:\d+\s+-\s+(.*)$", rest)
-    if msg_match:
-        message = msg_match.group(1)
-    else:
-        if " - " in rest:
-            message = rest.split(" - ", 1)[1]
-        else:
-            message = rest
-
-    try:
-        dt = datetime.strptime(timestamp_raw, "%Y-%m-%d %H:%M:%S.%f")
-        timestamp = dt.strftime("%H:%M:%S")
-    except ValueError:
-        timestamp = timestamp_raw
-
-    ui_level = LOG_LEVEL_MAP.get(level_raw.upper(), "info")
-    return timestamp, ui_level, message
-
-
-def _load_file_log_lines(max_lines: int = 200) -> list[tuple[str, str, str]]:
-    """读取 file.log 的最后 max_lines 行，返回解析后的日志条目列表。"""
-    if not LOG_FILE_PATH.exists():
-        return []
-
-    try:
-        text = LOG_FILE_PATH.read_text(encoding="utf-8")
-    except Exception:
-        return []
-
-    lines = text.splitlines()
-    lines = lines[-max_lines:]
-
-    entries: list[tuple[str, str, str]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        parsed = _parse_loguru_line(line)
-        if parsed:
-            entries.append(parsed)
-
-    return entries
+LOG_FILE_PATH = get_log_file_path()
 
 
 APP_STYLESHEET = """
@@ -544,7 +477,6 @@ class ConnectBrowserWorker(QThread):
 class ExecuteInvitesWorker(QThread):
     """邀请执行线程。"""
 
-    log_emitted = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -564,15 +496,11 @@ class ExecuteInvitesWorker(QThread):
             result = self._service.execute_invites(
                 template_id=self._template_id,
                 stop_requested=self._stop_event.is_set,
-                log_callback=self._emit_log,
             )
         except Exception as error:
             self.failed.emit(str(error))
             return
         self.completed.emit(result)
-
-    def _emit_log(self, entry: ExecutionLogEntryViewModel) -> None:
-        self.log_emitted.emit(entry)
 
 
 class TemplateManagerDialog(QDialog):
@@ -876,6 +804,9 @@ class NotifyConfigDialog(QDialog):
 class MainWindow(QMainWindow):
     """PySide6 主窗口。"""
 
+    # 日志接收信号：(timestamp, level, message)，用于把 loguru 回调切到主线程
+    _log_received = Signal(str, str, str)
+
     def __init__(
         self,
         service: ApplicationServiceProtocol | None = None,
@@ -883,16 +814,21 @@ class MainWindow(QMainWindow):
         auto_connect_browser: bool = True,
     ) -> None:
         super().__init__()
+        # 确保日志系统已初始化
+        setup_logging()
         self.service = service or AwinApplicationService()
         self._auto_connect_browser = auto_connect_browser
         self._runtime_state = self.service.bootstrap()
         self._connect_worker: ConnectBrowserWorker | None = None
         self._execute_worker: ExecuteInvitesWorker | None = None
+        self._ui_sink_id: int | None = None
         self._setup_window()
         self._build_ui()
         self._bind_events()
         self._apply_state(self._runtime_state)
+        # 先加载历史日志，再注册实时 sink，避免重复
         self._load_history_logs()
+        self._register_loguru_sink()
         if self._auto_connect_browser and not self._runtime_state.connection.browser_connected:
             QTimer.singleShot(0, self._start_auto_connect)
 
@@ -990,6 +926,8 @@ class MainWindow(QMainWindow):
         self.send_count_input.editingFinished.connect(self._on_send_count_changed)
         self.execute_button.clicked.connect(self._on_execute_clicked)
         self.stop_button.clicked.connect(self._on_stop_clicked)
+        # loguru 实时日志（从后台线程切到主线程）
+        self._log_received.connect(self._on_log_received)
 
     def _apply_state(self, state: AppRuntimeStateViewModel) -> None:
         self._runtime_state = state
@@ -1181,7 +1119,6 @@ class MainWindow(QMainWindow):
         self._runtime_state.execution.is_running = True
         self._apply_state(self._runtime_state)
         self._execute_worker = ExecuteInvitesWorker(self.service, active_id)
-        self._execute_worker.log_emitted.connect(self._on_execution_log_emitted)
         self._execute_worker.completed.connect(self._on_execution_completed)
         self._execute_worker.failed.connect(self._on_execution_failed)
         self._execute_worker.start()
@@ -1193,8 +1130,9 @@ class MainWindow(QMainWindow):
             self.execute_button.setText("正在停止...")
             self._append_log("warning", "正在请求停止任务...")
 
-    def _on_execution_log_emitted(self, entry: ExecutionLogEntryViewModel) -> None:
-        self._append_log(entry.level, entry.message, entry.timestamp)
+    def _on_log_received(self, timestamp: str, level: str, message: str) -> None:
+        """loguru 实时日志回调（已在主线程）。"""
+        self._append_log(level, message, timestamp)
 
     def _on_execution_completed(self, result: ExecutionResultViewModel) -> None:
         self._apply_state(self.service.get_state())
@@ -1215,11 +1153,59 @@ class MainWindow(QMainWindow):
             f"[{final_timestamp}] {level.upper()}: {message}"
         )
 
+    def _register_loguru_sink(self) -> None:
+        """注册 loguru UI sink，实时把日志推送到日志面板。"""
+        def _on_log(timestamp: str, level: str, message: str) -> None:
+            # 回调在 loguru 线程里，通过 Signal 切到主线程
+            self._log_received.emit(timestamp, level, message)
+
+        self._ui_sink_id = register_ui_sink(_on_log)
+
     def _load_history_logs(self) -> None:
-        """加载本地 file.log 历史日志到日志面板。"""
-        entries = _load_file_log_lines(max_lines=200)
-        for timestamp, level, message in entries:
-            self._append_log(level, message, timestamp)
+        """加载本地 file.log 最后 200 行到日志面板。"""
+        if not LOG_FILE_PATH.exists():
+            return
+        try:
+            text = LOG_FILE_PATH.read_text(encoding="utf-8")
+        except Exception:
+            return
+
+        lines = text.splitlines()
+        lines = lines[-200:]
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # loguru 默认格式: 时间 | 级别 | 模块:函数:行 - 消息
+            parts = line.split(" | ", 2)
+            if len(parts) < 3:
+                continue
+            timestamp_raw = parts[0].strip()
+            level_raw = parts[1].strip()
+            rest = parts[2].strip()
+            # 提取消息
+            if " - " in rest:
+                message = rest.split(" - ", 1)[1]
+            else:
+                message = rest
+            # 解析时间
+            try:
+                dt = datetime.strptime(timestamp_raw, "%Y-%m-%d %H:%M:%S.%f")
+                timestamp = dt.strftime("%H:%M:%S")
+            except ValueError:
+                timestamp = timestamp_raw
+            # 级别映射
+            level = level_raw.lower()
+            level_map = {
+                "info": "info",
+                "success": "success",
+                "warning": "warning",
+                "warn": "warning",
+                "error": "error",
+                "critical": "error",
+            }
+            ui_level = level_map.get(level, "info")
+            self._append_log(ui_level, message, timestamp)
 
     def _show_info(self, message: str) -> None:
         QMessageBox.information(self, "提示", message)
@@ -1229,6 +1215,13 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(self, "错误", message)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        """窗口关闭时注销 loguru UI sink。"""
+        if self._ui_sink_id is not None:
+            unregister_ui_sink(self._ui_sink_id)
+            self._ui_sink_id = None
+        super().closeEvent(event)
 
 
 def main() -> int:

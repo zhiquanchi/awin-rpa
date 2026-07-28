@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13.7.0",
     "textual>=3.0.0",
     "notify-py>=0.3.2",
+    "platformdirs>=4.3.6",
     "pydantic>=2.11.5",
     "pyside6>=6.9.0",
     "pyinstaller>=6.20.0",

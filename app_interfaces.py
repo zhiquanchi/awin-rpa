@@ -236,7 +236,7 @@ class SettingsRepositoryProtocol(Protocol):
     def snapshot(self) -> AppSettings:
         """Return a defensive copy of the current settings."""
 
-    def to_sync_payload(self) -> dict[str, Any]:
+    def to_storage_payload(self) -> dict[str, Any]:
         """Return the payload used by local persistence."""
 
 
@@ -257,7 +257,7 @@ class TemplateRepositoryProtocol(Protocol):
     def ensure_default_templates(self) -> list[InvitationTemplate]:
         """Return existing templates or create the default template set."""
 
-    def to_sync_payload(
+    def to_storage_payload(
         self, templates: Sequence[InvitationTemplate]
     ) -> list[dict[str, str]]:
         """Convert validated templates to the storage payload format."""
@@ -335,6 +335,5 @@ class ApplicationServiceProtocol(Protocol):
         self,
         template_id: int | None,
         stop_requested: Callable[[], bool] | None = None,
-        log_callback: Callable[[ExecutionLogEntryViewModel], None] | None = None,
     ) -> ExecutionResultViewModel:
         """同步执行邀请流程。"""
