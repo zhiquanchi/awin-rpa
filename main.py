@@ -1064,6 +1064,96 @@ class AwinRPA:
             logger.warning(f"刷新页面失败: {e}")
         self._audit("page_state_recovery_done")
 
+    def _wait_invite_http_result(
+        self, publisher_id: str, timeout: float = 10.0
+    ) -> dict:
+        """等待发送邀请接口的 HTTP 响应并返回判定详情（含详细日志与审计）。
+
+        需在点击发送按钮前先 tab.listen.start("xhr-invite-to-programme")。
+        接口返回 {"saved": true} 即为邀请真正写入成功的权威标记，
+        比结果弹窗文本更早、更可靠。无论判定结果如何都会记录详细日志，
+        便于事后排查"弹窗未出现/页面卡死"类问题。
+        """
+        started = time.monotonic()
+        result: dict = {
+            "captured": False,
+            "url": "",
+            "status": None,
+            "request_body": "",
+            "response_body": "",
+            "saved": False,
+            "elapsed": 0.0,
+            "error": "",
+        }
+        pkt = None
+        try:
+            pkt = self.tab.listen.wait(timeout=timeout)
+            result["elapsed"] = round(time.monotonic() - started, 3)
+            if not pkt:
+                result["error"] = f"no_packet_within_{timeout}s"
+                logger.warning(
+                    f"[invite-http] publisher={publisher_id} 点击发送后 {timeout}s 内"
+                    f"未捕获到 xhr-invite-to-programme 响应（可能请求未发出）"
+                )
+                return result
+
+            result["captured"] = True
+            try:
+                result["url"] = pkt.url or ""
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                result["status"] = pkt.response.status
+            except Exception as e:  # noqa: BLE001
+                result["error"] = f"read_status_failed: {e}"
+            try:
+                result["request_body"] = str(pkt.request.postData or "")[:500]
+            except Exception as e:  # noqa: BLE001
+                result["error"] += f"; read_request_failed: {e}"
+            try:
+                body = pkt.response.body
+                result["response_body"] = (
+                    json.dumps(body, ensure_ascii=False)
+                    if isinstance(body, (dict, list))
+                    else str(body or "")
+                )[:500]
+            except Exception as e:  # noqa: BLE001
+                result["error"] += f"; read_body_failed: {e}"
+
+            try:
+                parsed = json.loads(result["response_body"])
+                result["saved"] = (
+                    isinstance(parsed, dict) and parsed.get("saved") is True
+                )
+            except Exception:  # noqa: BLE001
+                result["saved"] = False
+
+            if result["saved"]:
+                logger.info(
+                    f"[invite-http] publisher={publisher_id} 发送接口确认成功: "
+                    f"HTTP {result['status']} {result['response_body']} "
+                    f"({result['elapsed']}s)"
+                )
+            else:
+                logger.warning(
+                    f"[invite-http] publisher={publisher_id} 发送接口未确认成功: "
+                    f"captured={result['captured']} status={result['status']!r} "
+                    f"body={result['response_body']!r} error={result['error']!r}"
+                )
+            return result
+        except Exception as e:  # noqa: BLE001
+            result["error"] += f"; wait_exception: {e}"
+            logger.warning(
+                f"[invite-http] publisher={publisher_id} 等待响应异常: {e}"
+            )
+            return result
+        finally:
+            self._audit("invite_http_result", publisher_id=publisher_id, **result)
+            try:
+                self.tab.listen.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _get_invite_result_popup_text(self, timeout: float = 8.0) -> str:
         """
         等待并读取发送邀请后的结果弹窗文本，用于识别明确失败原因。
@@ -1475,6 +1565,12 @@ class AwinRPA:
                 self._notify_feishu_invite_failure(publisher_id, "未找到发送按钮")
                 return False
             send_btn.wait.clickable(timeout=10)
+            # 监听发送接口的 HTTP 响应：{"saved": true} 是邀请写入成功的
+            # 权威标记，比结果弹窗更早出现，用于辅助判定与详细日志
+            try:
+                self.tab.listen.start("xhr-invite-to-programme", method=("POST",))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[invite-http] 启动网络监听失败（回落弹窗判断）: {e}")
             send_btn.click()
         except Exception as e:
             self._audit(
@@ -1484,8 +1580,14 @@ class AwinRPA:
                 stage="click_send_button",
                 error=str(e),
             )
+            try:
+                self.tab.listen.stop()
+            except Exception:  # noqa: BLE001
+                pass
             self._notify_feishu_invite_failure(publisher_id, "点击发送失败")
             return False
+
+        http_result = self._wait_invite_http_result(publisher_id)
 
         # 关闭结果弹窗（兼容多种弹窗结构，避免卡住）
         try:
@@ -1497,6 +1599,32 @@ class AwinRPA:
             result_popup_text = self._get_invite_result_popup_text()
             modal_state_before_close = self._get_invite_modal_state()
             if not popup_border_visible:
+                # HTTP 已确认保存成功时，结果弹窗未出现不代表发送失败
+                if http_result.get("saved"):
+                    self._audit(
+                        "invite_sent_success_via_http",
+                        click_seq=self._click_seq,
+                        publisher_id=publisher_id,
+                        popup_text=result_popup_text,
+                        modal_state=modal_state_before_close,
+                        http=http_result,
+                    )
+                    logger.info(
+                        f"[invite-http] publisher={publisher_id} 结果弹窗未出现，"
+                        f"但发送接口已确认成功（saved=true），按成功处理"
+                    )
+                    # 仍尽力点击清理可能残留的弹窗；清理失败由页面自愈机制兜底
+                    try:
+                        self._close_invite_result_popup(publisher_id)
+                        self._dismiss_invite_form_until_closed()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            f"[invite-http] publisher={publisher_id} "
+                            f"成功后的弹窗清理失败（忽略）: {e}"
+                        )
+                    self._mark_publisher_processed(publisher_id)
+                    self._consecutive_input_missing = 0
+                    return True
                 self._audit(
                     "invite_send_failed",
                     click_seq=self._click_seq,
@@ -1505,6 +1633,7 @@ class AwinRPA:
                     error="popup_border_not_found",
                     popup_text=result_popup_text,
                     modal_state_before_close=modal_state_before_close,
+                    http=http_result,
                 )
                 self._notify_feishu_invite_failure(
                     publisher_id, "发送后未出现结果弹窗"
@@ -1593,6 +1722,7 @@ class AwinRPA:
             "invite_sent_success",
             click_seq=self._click_seq,
             publisher_id=publisher_id,
+            http=http_result,
         )
         self._mark_publisher_processed(publisher_id)
         self.tab.wait(2, 3)
