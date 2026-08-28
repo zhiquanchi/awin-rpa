@@ -41,6 +41,9 @@ from main import (
     _update_recruitment_task,
 )
 
+# 空转熔断阈值：连续这么多轮"没有任何新成功"就自动停止任务
+MAX_EMPTY_ROUNDS = 5
+
 
 class AwinApplicationService(ApplicationServiceProtocol):
     """共享应用服务，负责聚合配置、模板与 RPA 执行逻辑。"""
@@ -316,6 +319,9 @@ class AwinApplicationService(ApplicationServiceProtocol):
         sent_count = 0
         failed_count = 0
         daily_stats = _load_daily_stats()
+        # 空转熔断：连续多轮没有任何新成功（翻页无效、页面卡死等）时自动停止
+        empty_rounds = 0
+        stalled = False
 
         # 记录招募任务开始
         from datetime import datetime
@@ -435,6 +441,18 @@ class AwinApplicationService(ApplicationServiceProtocol):
                         self._execution_state.last_message,
                     )
 
+                if found_new:
+                    empty_rounds = 0
+                else:
+                    empty_rounds += 1
+                    if empty_rounds >= MAX_EMPTY_ROUNDS:
+                        stalled = True
+                        self._emit_log(
+                            "error",
+                            f"连续 {MAX_EMPTY_ROUNDS} 轮没有新的成功邀请，已自动停止任务",
+                        )
+                        break
+
                 if not found_new and not stop_checker():
                     self._emit_log(
                         "info",
@@ -444,13 +462,22 @@ class AwinApplicationService(ApplicationServiceProtocol):
 
             _save_daily_stats(daily_stats)
             stopped = stop_checker() and sent_count < target_count
-            completed = not stopped
-            status = "stopped" if stopped else "completed"
-            last_message = (
-                "任务已手动停止"
-                if stopped
-                else f"任务执行完成！共发送 {sent_count} 条邀请，失败 {failed_count} 条"
-            )
+            completed = not stopped and not stalled
+            if stopped:
+                status = "stopped"
+                last_message = "任务已手动停止"
+            elif stalled:
+                status = "error"
+                last_message = (
+                    f"连续 {MAX_EMPTY_ROUNDS} 轮没有新的成功邀请，已自动停止。"
+                    f"共发送 {sent_count} 条邀请，失败 {failed_count} 条，"
+                    "请检查浏览器页面状态后重新执行"
+                )
+            else:
+                status = "completed"
+                last_message = (
+                    f"任务执行完成！共发送 {sent_count} 条邀请，失败 {failed_count} 条"
+                )
             # 更新招募历史记录
             from datetime import datetime
 
@@ -469,11 +496,11 @@ class AwinApplicationService(ApplicationServiceProtocol):
                 failed_count=failed_count,
                 target_count=target_count,
                 last_message=last_message,
-                stopped=stopped,
+                stopped=stopped or stalled,
                 error_message=None,
             )
             self._emit_log(
-                "error" if stopped else "success",
+                "error" if (stopped or stalled) else "success",
                 last_message,
             )
             return ExecutionResultViewModel(

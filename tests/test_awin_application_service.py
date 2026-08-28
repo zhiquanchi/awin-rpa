@@ -163,6 +163,48 @@ def test_connect_browser_does_not_require_active_template(
     assert connected_state.connection.browser_connected is True
 
 
+def test_execute_stops_after_consecutive_empty_rounds(
+    local_paths: tuple[Path, Path],
+) -> None:
+    """页面卡死（所有邀请都失败、翻页无效）时应自动停止而不是无限空转。"""
+    from awin_application_service import MAX_EMPTY_ROUNDS
+
+    config_path, template_path = local_paths
+    repository = JsonTemplateRepository(file_path=template_path)
+    repository.save_templates([InvitationTemplate(id=1, name="模板1", content="内容1")])
+    settings = ConfigManager(config_path=config_path)
+    settings.active_template_index = 0
+    settings.send_count = 10
+    # 所有邀请都失败，且每次翻页后返回同一批 publisher（模拟页面卡死）
+    fake_rpa = FakeRpaRunner(None, None)
+    fake_rpa._publisher_batches = None
+    fake_rpa.send_invite_to_publisher = lambda publisher_id, msg: False  # type: ignore[method-assign]
+    fake_rpa.get_publisher_ids = lambda: ["1001", "1002"]  # type: ignore[method-assign]
+    log_messages: list[str] = []
+
+    def _capture_sink(message):
+        log_messages.append(message.record["message"])
+
+    sink_id = logger.add(_capture_sink, level="INFO")
+    try:
+        service = AwinApplicationService(
+            template_repository=repository,
+            settings_factory=lambda: ConfigManager(config_path=config_path),
+            rpa_factory=lambda notify_channel, webhook: fake_rpa,
+        )
+        service.bootstrap()
+        service.connect_browser()
+
+        result = service.execute_invites(template_id=1)
+
+        assert result.completed is False
+        assert result.sent_count == 0
+        assert "已自动停止" in result.last_message
+        assert any("已自动停止" in m for m in log_messages)
+    finally:
+        logger.remove(sink_id)
+
+
 @pytest.mark.parametrize(
     "operation",
     [
