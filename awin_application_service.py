@@ -342,6 +342,7 @@ class AwinApplicationService(ApplicationServiceProtocol):
         try:
             assert self._rpa is not None
             self._rpa.current_template_name = execution_template_name
+            self._rpa.reset_failure_tracking()
 
             while sent_count < target_count and not stop_checker():
                 self._emit_log("info", "正在获取 publisher 列表...")

@@ -767,6 +767,8 @@ class AwinRPA:
     INVITE_ALREADY_EXISTS_TEXT = (
         "invitation already exists. please refresh and try again"
     )
+    # 这些状态的按钮点击后不会弹出邀请表单（实测自 Awin 前端）
+    NON_INVITABLE_TITLES = {"Invited", "End Partnership", "Resume Partnership"}
 
     def __init__(
         self, notify_channel: str | None = None, feishu_webhook_url: str | None = None
@@ -792,6 +794,9 @@ class AwinRPA:
         self._click_seq = 0
         self._seen_publisher_ids: set[str] = _load_id_set(SEEN_IDS_PATH)
         self._clicked_publisher_ids: set[str] = _load_id_set(CLICKED_IDS_PATH)
+        # 弹窗残留自愈：连续"未找到输入框"计数与单 publisher 失败计数
+        self._consecutive_input_missing = 0
+        self._publisher_fail_counts: dict[str, int] = {}
 
         if self.tab is None:
             raise RuntimeError("无法获取可用的浏览器标签页，请检查浏览器状态。")
@@ -976,7 +981,19 @@ class AwinRPA:
     def get_publisher_ids(self) -> list[str]:
         """获取所有 publisher ID"""
         table = self.tab.ele('xpath=//*[@id="directoryResults"]/table')
-        invite_links = table.eles("xpath:.//a[@data-publisherid]")
+        # 只采集可邀请的按钮；已邀请(Invited)/合作中(End Partnership)等
+        # 状态的按钮点击后不会弹窗，混入会造成大量无效重试
+        invite_links = table.eles(
+            'xpath:.//a[@data-publisherid][@title="Invite Publisher"]'
+        )
+        if not invite_links:
+            # 防御 Awin 前端文案调整导致过滤失效：回退到采集全部链接
+            all_links = table.eles("xpath:.//a[@data-publisherid]")
+            if all_links:
+                logger.warning(
+                    "未找到 title 为 Invite Publisher 的按钮，已回退为采集全部链接"
+                )
+            invite_links = all_links
         publisher_ids_raw = [link.attr("data-publisherid") for link in invite_links]
         publisher_ids = [pid for pid in publisher_ids_raw if pid]
         publisher_ids = list(dict.fromkeys(publisher_ids))  # 去重且保留顺序
@@ -1017,6 +1034,35 @@ class AwinRPA:
             return
         self._clicked_publisher_ids.add(publisher_id)
         _append_new_ids(CLICKED_IDS_PATH, [publisher_id])
+
+    def reset_failure_tracking(self) -> None:
+        """重置失败跟踪状态（每个任务开始时调用）。"""
+        self._consecutive_input_missing = 0
+        self._publisher_fail_counts = {}
+
+    def _recover_page_state(self) -> None:
+        """清理残留弹窗并刷新页面，恢复被破坏的弹窗状态。
+
+        场景：某次发送后结果弹窗未正常出现，残留的 modal/遮罩会拦截
+        后续所有点击（邀请链接点不开、翻页也无效），表现为连续
+        "未找到输入框"。刷新页面即可恢复（等价于重启任务）。
+        """
+        self._audit(
+            "page_state_recovery_started",
+            consecutive_input_missing=self._consecutive_input_missing,
+        )
+        try:
+            self._dismiss_invite_form_until_closed()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"清理残留弹窗失败（忽略，继续刷新页面）: {e}")
+        try:
+            self.tab.refresh()
+            self.tab.ele('xpath=//*[@id="directoryResults"]/table', timeout=30)
+        except PageDisconnectedError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"刷新页面失败: {e}")
+        self._audit("page_state_recovery_done")
 
     def _get_invite_result_popup_text(self, timeout: float = 8.0) -> str:
         """
@@ -1323,6 +1369,28 @@ class AwinRPA:
                 self._notify_feishu_invite_failure(publisher_id, "未找到按钮")
                 return False
 
+        # 按钮状态防御：已邀请/合作中的按钮点击后不会弹窗，直接跳过
+        button_class = (invite_link.attr("class") or "").strip()
+        button_title = (invite_link.attr("title") or "").strip()
+        if "disabled" in button_class or button_title in self.NON_INVITABLE_TITLES:
+            self._audit(
+                "invite_button_not_invitable",
+                click_seq=self._click_seq,
+                publisher_id=publisher_id,
+                button_class=button_class,
+                button_title=button_title,
+            )
+            self._mark_publisher_processed(publisher_id)
+            self._notify_feishu_invite_failure(
+                publisher_id,
+                f"按钮状态不可邀请（{button_title or button_class}），已跳过",
+            )
+            return False
+        if button_title and button_title != "Invite Publisher":
+            logger.warning(
+                f"publisher {publisher_id} 按钮标题异常: {button_title!r}，仍尝试点击"
+            )
+
         logger.info(f"向 publisher ID: {publisher_id} 发送 invitation")
 
         try:
@@ -1354,8 +1422,33 @@ class AwinRPA:
                     stage="wait_custom_message",
                     error="customMessage_not_found",
                 )
+                self._consecutive_input_missing += 1
+                fail_count = self._publisher_fail_counts.get(publisher_id, 0) + 1
+                self._publisher_fail_counts[publisher_id] = fail_count
+                self._audit(
+                    "invite_input_missing",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    consecutive_input_missing=self._consecutive_input_missing,
+                    publisher_fail_count=fail_count,
+                )
+                # 连续点不开弹窗，基本可判定页面弹窗状态已损坏（残留遮罩
+                # 拦截点击），清理弹窗并刷新页面自愈
+                if self._consecutive_input_missing >= 2:
+                    logger.warning(
+                        "连续多次未找到输入框，尝试清理弹窗并刷新页面恢复"
+                    )
+                    self._recover_page_state()
+                    self._consecutive_input_missing = 0
+                # 自愈后仍反复失败的 publisher 标记跳过，避免死循环重试
+                if fail_count >= 2:
+                    logger.warning(
+                        f"publisher {publisher_id} 已连续失败 {fail_count} 次，标记跳过"
+                    )
+                    self._mark_publisher_processed(publisher_id)
                 self._notify_feishu_invite_failure(publisher_id, "未找到输入框")
                 return False
+            self._consecutive_input_missing = 0
             custom_message.input(msg)
         except Exception as e:
             self._audit(

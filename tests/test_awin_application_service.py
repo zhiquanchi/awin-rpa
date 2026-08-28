@@ -44,6 +44,9 @@ class FakeRpaRunner:
         self._clicked_ids.clear()
         return count
 
+    def reset_failure_tracking(self) -> None:
+        """重置失败跟踪状态占位实现。"""
+
     def clicked_publisher_count(self) -> int:
         """返回已点击记录数量。"""
         return len(self._clicked_ids)
