@@ -1067,12 +1067,12 @@ class AwinRPA:
     def _wait_invite_http_result(
         self, publisher_id: str, timeout: float = 10.0
     ) -> dict:
-        """等待发送邀请接口的 HTTP 响应并返回判定详情（含详细日志与审计）。
+        """等待发送邀请接口的 HTTP 响应并返回判定详情。
 
         需在点击发送按钮前先 tab.listen.start("xhr-invite-to-programme")。
-        接口返回 {"saved": true} 即为邀请真正写入成功的权威标记，
-        比结果弹窗文本更早、更可靠。无论判定结果如何都会记录详细日志，
-        便于事后排查"弹窗未出现/页面卡死"类问题。
+        接口返回 {"saved": true} 即为邀请真正写入成功的权威标记。
+        此处不做详细记录（常规成功由弹窗流程处理）；只有调用方在
+        "按钮可邀请但发送后报已邀请"等异常场景才记录详细日志与审计。
         """
         started = time.monotonic()
         result: dict = {
@@ -1085,16 +1085,11 @@ class AwinRPA:
             "elapsed": 0.0,
             "error": "",
         }
-        pkt = None
         try:
             pkt = self.tab.listen.wait(timeout=timeout)
             result["elapsed"] = round(time.monotonic() - started, 3)
             if not pkt:
                 result["error"] = f"no_packet_within_{timeout}s"
-                logger.warning(
-                    f"[invite-http] publisher={publisher_id} 点击发送后 {timeout}s 内"
-                    f"未捕获到 xhr-invite-to-programme 响应（可能请求未发出）"
-                )
                 return result
 
             result["captured"] = True
@@ -1127,28 +1122,11 @@ class AwinRPA:
                 )
             except Exception:  # noqa: BLE001
                 result["saved"] = False
-
-            if result["saved"]:
-                logger.info(
-                    f"[invite-http] publisher={publisher_id} 发送接口确认成功: "
-                    f"HTTP {result['status']} {result['response_body']} "
-                    f"({result['elapsed']}s)"
-                )
-            else:
-                logger.warning(
-                    f"[invite-http] publisher={publisher_id} 发送接口未确认成功: "
-                    f"captured={result['captured']} status={result['status']!r} "
-                    f"body={result['response_body']!r} error={result['error']!r}"
-                )
             return result
         except Exception as e:  # noqa: BLE001
             result["error"] += f"; wait_exception: {e}"
-            logger.warning(
-                f"[invite-http] publisher={publisher_id} 等待响应异常: {e}"
-            )
             return result
         finally:
-            self._audit("invite_http_result", publisher_id=publisher_id, **result)
             try:
                 self.tab.listen.stop()
             except Exception:  # noqa: BLE001
@@ -1640,6 +1618,23 @@ class AwinRPA:
                 )
                 return False
             if self.INVITE_ALREADY_EXISTS_TEXT in result_popup_text.lower():
+                # 按钮状态是可邀请，发送后却报"已邀请过"——状态不一致，
+                # 是顽固失败 ID 的关键信号，记录详细日志与审计
+                logger.warning(
+                    f"[invite-http] publisher={publisher_id} 按钮为可邀请状态，"
+                    f"发送后却返回已邀请过: 弹窗={result_popup_text!r} "
+                    f"http_captured={http_result.get('captured')} "
+                    f"http_status={http_result.get('status')!r} "
+                    f"http_body={http_result.get('response_body')!r} "
+                    f"http_error={http_result.get('error')!r}"
+                )
+                self._audit(
+                    "invite_http_result_already_invited",
+                    click_seq=self._click_seq,
+                    publisher_id=publisher_id,
+                    popup_text=result_popup_text,
+                    http=http_result,
+                )
                 self._audit(
                     "invite_send_failed",
                     click_seq=self._click_seq,
@@ -1648,6 +1643,7 @@ class AwinRPA:
                     error="invitation_already_exists",
                     popup_text=result_popup_text,
                     modal_state_before_close=modal_state_before_close,
+                    http=http_result,
                 )
                 closed = self._close_invite_result_popup(publisher_id)
                 dismissed = self._dismiss_invite_form_until_closed()
@@ -1722,7 +1718,6 @@ class AwinRPA:
             "invite_sent_success",
             click_seq=self._click_seq,
             publisher_id=publisher_id,
-            http=http_result,
         )
         self._mark_publisher_processed(publisher_id)
         self.tab.wait(2, 3)
