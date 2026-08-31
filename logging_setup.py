@@ -32,7 +32,7 @@ def setup_logging(level: str = "INFO") -> None:
 
     - 移除 loguru 默认的 stderr sink（避免与 GUI 场景冲突）
     - 注册自定义 SUCCESS 级别
-    - 添加文件日志 sink：轮转 10MB，保留 30 天，UTF-8 编码
+    - 添加文件日志 sink：每日一份，保留最近 7 天，UTF-8 编码
     - 添加结构化审计日志 sink：仅记录带 audit=True 的日志，JSONL 格式
     """
     global _initialized
@@ -48,12 +48,12 @@ def setup_logging(level: str = "INFO") -> None:
     # 移除默认 stderr sink，统一由我们自己配置
     logger.remove()
 
-    # 文件日志：普通运行日志，带轮转与清理
+    # 文件日志：普通运行日志，每日零点轮转，保留最近 7 天
     logger.add(
         APP_LOG_PATH,
         level=level,
-        rotation="10 MB",
-        retention="30 days",
+        rotation="00:00",
+        retention="7 days",
         encoding="utf-8",
         enqueue=True,  # 线程/进程安全，配合 GUI 线程
         backtrace=True,
@@ -71,14 +71,14 @@ def setup_logging(level: str = "INFO") -> None:
         enqueue=True,
     )
 
-    # 结构化审计日志：仅记录带 audit=True 的事件
+    # 结构化审计日志：仅记录带 audit=True 的事件，同样每日轮转、保留 7 天
     logger.add(
         AUDIT_LOG_PATH,
         level="INFO",
         serialize=True,
         filter=_audit_filter,
-        rotation="50 MB",
-        retention="90 days",
+        rotation="00:00",
+        retention="7 days",
         encoding="utf-8",
         enqueue=True,
     )
