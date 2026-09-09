@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AwinRPA MSI 安装包定义（WiX v4/v7 语法）
+     构建: wix build packaging/AwinRPA.wxs -arch x64 -o dist/AwinRPA-<版本>-x64.msi -define BuildDir=dist/AwinRPA -define AppVersion=0.2.1 -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="AwinRPA"
+      Manufacturer="AwinRPA"
+      Version="$(var.AppVersion)"
+      Scope="perMachine"
+      UpgradeCode="ae7fa4bc-cf46-4a32-8ba6-76f01b4cd2d9"
+      Compressed="yes">
+    <SummaryInformation Description="Awin RPA 安装包" />
+
+    <!-- 主升级：同 UpgradeCode 高版本自动覆盖安装旧版本 -->
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本 [ProductName]，无法降级安装。" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="DISABLEADVTSHORTCUTS" Value="1" />
+
+    <Feature Id="Main" Title="AwinRPA" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="AwinRPA" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="AwinRPA" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.BuildDir)\**\*" />
+    </ComponentGroup>
+
+    <DirectoryRef Id="AppMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="8f2d1c5e-3a4b-4c6d-9e7f-1a2b3c4d5e6f">
+        <Shortcut Id="AppShortcut"
+                  Name="AwinRPA"
+                  Description="Awin 邀请自动发送工具"
+                  Target="[INSTALLFOLDER]AwinRPA.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\AwinRPA"
+                       Name="shortcut_installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Package>
+</Wix>
