@@ -17,6 +17,7 @@ a = Analysis(
         'textual',
         'tkinter',
         'pytest',
+        'numpy',  # 代码未直接使用（bs4/pydantic 的可选依赖被连带打包），裁掉省约 28MB
     ],
     noarchive=False,
 )
