@@ -60,16 +60,19 @@ def setup_logging(level: str = "INFO") -> None:
         diagnose=False,
     )
 
-    # 同时在控制台输出一份（开发/CLI 模式下可见）
-    logger.add(
-        sys.stderr,
-        level=level,
-        format="<green>{time:HH:mm:ss}</green> | "
-        "<level>{level:<7}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-        "<level>{message}</level>",
-        enqueue=True,
-    )
+    # 同时在控制台输出一份（开发/CLI 模式下可见）。
+    # windowed 打包（console=False）双击启动时 sys.stderr 为 None，
+    # loguru 无法注册 None sink，需跳过；GUI 下日志以文件日志为准。
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level=level,
+            format="<green>{time:HH:mm:ss}</green> | "
+            "<level>{level:<7}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>",
+            enqueue=True,
+        )
 
     # 结构化审计日志：仅记录带 audit=True 的事件，同样每日轮转、保留 7 天
     logger.add(
