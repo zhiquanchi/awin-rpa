@@ -1,0 +1,79 @@
+name: build-msi
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# 发布 Release 需要写权限
+permissions:
+  contents: write
+
+concurrency:
+  group: build-msi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 同步依赖
+        run: uv sync
+
+      - name: 校验版本号（tag 构建要求与 pyproject.toml 一致）
+        shell: pwsh
+        run: |
+          $pyprojectVersion = (Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "pyproject.toml 版本: $pyprojectVersion"
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+              if ($tagVersion -ne $pyprojectVersion) {
+                  throw "tag $env:GITHUB_REF_NAME 与 pyproject.toml 版本 $pyprojectVersion 不一致；先改版本号再打 tag"
+              }
+          }
+
+      - name: 安装 WiX
+        run: dotnet tool install --global wix
+
+      - name: 接受 WiX 7 OSMF EULA（全新环境首次使用必须，WIX7015）
+        run: wix eula accept wix7
+
+      - name: 构建 MSI（PyInstaller + Qt 裁剪 + WiX）
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_msi.ps1
+
+      - name: 验证静默安装/卸载（CI 以管理员运行，免 UAC）
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/AwinRPA-*.msi | Select-Object -First 1).FullName
+          $install = Start-Process msiexec -ArgumentList '/i', $msi, '/qn', '/norestart', '/l*v', 'install.log' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "静默安装失败，退出码 $($install.ExitCode)，详见 install.log" }
+          if (-not (Test-Path 'C:\Program Files\AwinRPA\AwinRPA.exe')) { throw "安装后未找到主程序" }
+          $uninstall = Start-Process msiexec -ArgumentList '/x', $msi, '/qn', '/norestart' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "静默卸载失败，退出码 $($uninstall.ExitCode)" }
+          Write-Host "安装/卸载验证通过"
+
+      - name: 上传构建产物（每次运行可从 Actions 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: AwinRPA-msi
+          path: dist/AwinRPA-*.msi
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Release（仅 v* tag 触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $msi = (Get-ChildItem dist/AwinRPA-*.msi | Select-Object -First 1).Name
+          gh release create "$tag" "dist/$msi" --title "$tag" --generate-notes `
+            || gh release upload "$tag" "dist/$msi" --clobber
