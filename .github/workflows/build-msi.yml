@@ -49,6 +49,24 @@ jobs:
       - name: 构建 MSI（PyInstaller + Qt 裁剪 + WiX）
         run: powershell -ExecutionPolicy Bypass -File scripts/build_msi.ps1
 
+      - name: 签名 MSI（内部自签名证书，密钥在仓库 Secrets）
+        shell: pwsh
+        env:
+          SIGNING_PFX_B64: ${{ secrets.SIGNING_PFX_B64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_B64))
+          $secure = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          Remove-Item $pfx -Force
+          $msi = (Get-ChildItem dist/AwinRPA-*.msi | Select-Object -First 1).FullName
+          & signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $msi
+          if ($LASTEXITCODE -ne 0) { throw "MSI 签名失败" }
+          $sig = Get-AuthenticodeSignature $msi
+          if (-not $sig.SignerCertificate) { throw "签名校验失败：MSI 上没有签名" }
+          Write-Host "已签名: $($sig.SignerCertificate.Subject)"
+
       - name: 验证静默安装/卸载（CI 以管理员运行，免 UAC）
         shell: pwsh
         run: |
@@ -75,5 +93,5 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $msi = (Get-ChildItem dist/AwinRPA-*.msi | Select-Object -First 1).Name
-          gh release create "$tag" "dist/$msi" --title "$tag" --generate-notes `
-            || gh release upload "$tag" "dist/$msi" --clobber
+          gh release create "$tag" "dist/$msi" packaging/AwinRPA-signing.cer packaging/trust-cert.ps1 --title "$tag" --generate-notes `
+            || gh release upload "$tag" "dist/$msi" packaging/AwinRPA-signing.cer packaging/trust-cert.ps1 --clobber
