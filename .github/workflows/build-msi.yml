@@ -60,8 +60,14 @@ jobs:
           $secure = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
           $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
           Remove-Item $pfx -Force
+          # runner 上 signtool 不在 PATH，需在 Windows Kits 里定位
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin", "C:\Program Files\Windows Kits\10\bin" `
+              -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\x64\\' } |
+              Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "runner 上未找到 signtool.exe（Windows Kits）" }
           $msi = (Get-ChildItem dist/AwinRPA-*.msi | Select-Object -First 1).FullName
-          & signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $msi
+          & $signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $msi
           if ($LASTEXITCODE -ne 0) { throw "MSI 签名失败" }
           $sig = Get-AuthenticodeSignature $msi
           if (-not $sig.SignerCertificate) { throw "签名校验失败：MSI 上没有签名" }
